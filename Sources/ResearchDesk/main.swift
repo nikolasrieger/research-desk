@@ -58,7 +58,7 @@ struct DeskMetalPlate: View {
     }
 }
 
-/// Static planes suggest the reference's spatial gallery without distracting motion.
+/// Static layered planes for workspace empty states.
 struct DeskSpatialMark: View {
     var body: some View {
         ZStack {

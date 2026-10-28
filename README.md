@@ -16,6 +16,4 @@ swift run --disable-sandbox
 
 Add a local folder or SSH workspace to begin. The optional PaperDaily workspace can point to your [paper-app](../paper-app) checkout via **Choose repo…**.
 
-Workspace settings, notes, and session metadata stay on this Mac. Agents and hosted services use their own connections.
-
 [Usage and packaging](docs/usage.md) · [Vendored SwiftTerm license](Vendor/SwiftTerm/LICENSE)
