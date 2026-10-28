@@ -518,9 +518,8 @@ enum Command {
             guard let data = Data(base64Encoded: output) else { return (nil, "Could not decode remote file") }
             return (data, "")
         }
-        let root = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().path
+        guard FileBrowserIO.containsPath(path, in: project.path) else { return (nil, "File is outside this project") }
         let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        guard file.path == root || file.path.hasPrefix(root + "/") else { return (nil, "File is outside this project") }
         do {
             let values = try file.resourceValues(forKeys: [.fileSizeKey])
             guard (values.fileSize ?? 0) <= limit else { return (nil, "File is larger than 15 MB") }

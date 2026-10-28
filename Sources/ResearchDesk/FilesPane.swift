@@ -3,14 +3,27 @@ import AppKit
 import AVKit
 
 enum FileBrowserIO {
+    static func containsPath(_ path: String, in root: String) -> Bool {
+        func normalized(_ value: String) -> String {
+            var parts: [Substring] = []
+            for part in URL(fileURLWithPath: value).path.split(separator: "/") {
+                if part == ".." { if !parts.isEmpty { parts.removeLast() } }
+                else if part != "." { parts.append(part) }
+            }
+            return "/" + parts.joined(separator: "/")
+        }
+        let base = normalized(root)
+        let file = normalized(path)
+        return file == base || file.hasPrefix(base == "/" ? "/" : base + "/")
+    }
+
     static let remotePathScript = """
     import os,sys
-    requested_root=os.path.expanduser(sys.argv[1])
-    requested_path=os.path.expanduser(sys.argv[2])
-    root=os.path.realpath(requested_root)
+    requested_root=os.path.abspath(os.path.expanduser(sys.argv[1]))
+    requested_path=os.path.abspath(os.path.expanduser(sys.argv[2]))
+    if os.path.commonpath([requested_root,requested_path]) != requested_root:
+        sys.exit('File path is outside this project.\\nRequested file: '+requested_path+'\\nProject: '+requested_root)
     p=os.path.realpath(requested_path)
-    if os.path.commonpath([root,p]) != root:
-        sys.exit('File resolves outside this project. A file or parent folder may be a symlink.\\nRequested file: '+requested_path+'\\nResolved file: '+p+'\\nProject: '+requested_root+'\\nResolved project: '+root)
     """
 
     static let remotePreviewScript = remotePathScript + "\n" + """
@@ -33,11 +46,10 @@ enum FileBrowserIO {
     /// Streams remote bytes to disk, so downloads and movies do not pass through base64 or RAM.
     static func copyFile(_ project: Project, path: String, to destination: URL, limit: Int? = nil) throws {
         if !project.isRemote {
-            let root = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().path
-            let source = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            guard source.path.hasPrefix(root == "/" ? root : root + "/") else {
+            guard containsPath(path, in: project.path) else {
                 throw CocoaError(.fileReadNoPermission)
             }
+            let source = URL(fileURLWithPath: path).resolvingSymlinksInPath()
             let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values.isRegularFile == true else { throw CocoaError(.fileReadUnsupportedScheme) }
             if let limit, (values.fileSize ?? 0) > limit {
@@ -103,15 +115,14 @@ enum FileBrowserIO {
 
     static func listing(_ project: Project, path: String) -> (RemoteListing?, String) {
         if project.isRemote { return Command.remoteListing(host: project.host, path: path) }
-        let root = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().path
-        let directory = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-        guard directory.path == root || directory.path.hasPrefix(root + "/") else {
+        let directory = URL(fileURLWithPath: path)
+        guard containsPath(path, in: project.path) else {
             return (nil, "Folder is outside this project")
         }
         do {
-            let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [])
+            let urls = try FileManager.default.contentsOfDirectory(at: directory.resolvingSymlinksInPath(), includingPropertiesForKeys: [.isDirectoryKey], options: [])
             let entries = urls.map { url -> RemoteEntry in
-                let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                let isDirectory = (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
                 return RemoteEntry(name: url.lastPathComponent, directory: isDirectory)
             }.sorted { left, right in
                 if left.directory != right.directory { return left.directory }
@@ -197,7 +208,7 @@ struct FilePreview: Sendable {
     }
 
     func load(_ path: String) {
-        guard path == project.path || path.hasPrefix(project.path + "/") else { return }
+        guard FileBrowserIO.containsPath(path, in: project.path) else { return }
         requestID = UUID()
         let request = requestID
         loading = true

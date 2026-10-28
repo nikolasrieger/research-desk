@@ -2,7 +2,7 @@ import XCTest
 @testable import ResearchDesk
 
 final class FileDownloadsTests: XCTestCase {
-    func testRemotePreviewPathsAndSymlinkDiagnostics() throws {
+    func testRemotePreviewFollowsWorkspaceSymlinksAndRejectsUnrelatedPaths() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let project = root.appendingPathComponent("project")
@@ -26,16 +26,15 @@ final class FileDownloadsTests: XCTestCase {
         try bytes.write(to: outside)
         let link = nested.appendingPathComponent("linked.png")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
-        let rejected = preview(project.path, link.path)
-        XCTAssertNotEqual(rejected.2, 0)
-        XCTAssertTrue(rejected.1.contains("Requested file: " + link.path))
-        func resolved(_ label: String) -> String? {
-            guard let line = rejected.1.components(separatedBy: "\n").first(where: { $0.hasPrefix(label) }) else { return nil }
-            return URL(fileURLWithPath: String(line.dropFirst(label.count))).resolvingSymlinksInPath().path
+        let linked = preview(project.path, link.path)
+        XCTAssertEqual(linked.2, 0, linked.1)
+        XCTAssertEqual(Data(base64Encoded: linked.0), bytes)
+        for path in [outside.path, project.appendingPathComponent("../outside.png").path] {
+            let rejected = preview(project.path, path)
+            XCTAssertNotEqual(rejected.2, 0)
+            XCTAssertTrue(rejected.1.contains("File path is outside this project"))
+            XCTAssertFalse(rejected.1.contains("Traceback"))
         }
-        XCTAssertEqual(resolved("Resolved file: "), outside.resolvingSymlinksInPath().path)
-        XCTAssertEqual(resolved("Resolved project: "), project.resolvingSymlinksInPath().path)
-        XCTAssertFalse(rejected.1.contains("Traceback"))
     }
 
     func testDownloadsPreserveBytesAndExistingFilesBeyondPreviewLimit() throws {
@@ -57,7 +56,7 @@ final class FileDownloadsTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: downloads.path).count, 2)
     }
 
-    func testDownloadRejectsSymlinkOutsideProjectAndCleansPartialFiles() throws {
+    func testLocalWorkspaceFollowsLinkedArtifactFolder() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("project")
@@ -65,10 +64,23 @@ final class FileDownloadsTests: XCTestCase {
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         let outside = root.appendingPathComponent("outside.txt")
         try Data("private".utf8).write(to: outside)
-        let link = source.appendingPathComponent("link.txt")
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
-        XCTAssertThrowsError(try FileBrowserIO.download(Project(name: "Test", path: source.path), path: link.path, directory: downloads))
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: downloads.path), [])
+        let link = source.appendingPathComponent("artifacts")
+        let storage = root.appendingPathComponent("storage")
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try Data("plot".utf8).write(to: storage.appendingPathComponent("plot.png"))
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: storage)
+        let project = Project(name: "Test", path: source.path)
+        let listing = FileBrowserIO.listing(project, path: link.path)
+        XCTAssertEqual(listing.0?.path, link.path, listing.1)
+        XCTAssertEqual(listing.0?.entries.first?.name, "plot.png")
+        let path = link.appendingPathComponent("plot.png").path
+        XCTAssertEqual(Command.fileData(project, path: path).0, Data("plot".utf8))
+        let downloaded = try FileBrowserIO.download(project, path: path, directory: downloads)
+        XCTAssertEqual(try Data(contentsOf: downloaded), Data("plot".utf8))
+        XCTAssertThrowsError(try FileBrowserIO.download(project, path: outside.path, directory: downloads))
+        XCTAssertNil(Command.fileData(project, path: outside.path).0)
+        XCTAssertNil(FileBrowserIO.listing(project, path: storage.path).0)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: downloads.path), ["plot.png"])
     }
 
     func testMoviePreviewLimitAndTemporaryFileCleanup() throws {
