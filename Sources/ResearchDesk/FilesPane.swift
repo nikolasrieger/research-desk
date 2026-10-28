@@ -3,6 +3,33 @@ import AppKit
 import AVKit
 
 enum FileBrowserIO {
+    static let remotePathScript = """
+    import os,sys
+    requested_root=os.path.expanduser(sys.argv[1])
+    requested_path=os.path.expanduser(sys.argv[2])
+    root=os.path.realpath(requested_root)
+    p=os.path.realpath(requested_path)
+    if os.path.commonpath([root,p]) != root:
+        sys.exit('File resolves outside this project. A file or parent folder may be a symlink.\\nRequested file: '+requested_path+'\\nResolved file: '+p+'\\nProject: '+requested_root+'\\nResolved project: '+root)
+    """
+
+    static let remotePreviewScript = remotePathScript + "\n" + """
+    import base64,stat
+    try:
+        with open(p,'rb') as f:
+            info=os.fstat(f.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                sys.exit('Not a regular file: '+requested_path)
+            if info.st_size>15000000:
+                sys.exit('File is larger than 15 MB: '+requested_path)
+            data=f.read(15000001)
+            if len(data)>15000000:
+                sys.exit('File is larger than 15 MB: '+requested_path)
+            sys.stdout.write(base64.b64encode(data).decode('ascii'))
+    except OSError as error:
+        sys.exit('Could not read '+requested_path+': '+str(error))
+    """
+
     /// Streams remote bytes to disk, so downloads and movies do not pass through base64 or RAM.
     static func copyFile(_ project: Project, path: String, to destination: URL, limit: Int? = nil) throws {
         if !project.isRemote {
@@ -22,10 +49,9 @@ enum FileBrowserIO {
         guard !project.host.hasPrefix("-"), project.host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             throw CocoaError(.fileReadNoPermission)
         }
-        let script = """
-        import os,sys,stat,shutil
-        root=os.path.realpath(sys.argv[1]); p=os.path.realpath(sys.argv[2]); limit=int(sys.argv[3])
-        assert os.path.commonpath([root,p])==root, 'Outside project'
+        let script = remotePathScript + "\n" + """
+        import stat,shutil
+        limit=int(sys.argv[3])
         with open(p,'rb') as f:
             info=os.fstat(f.fileno())
             assert stat.S_ISREG(info.st_mode), 'Not a regular file'

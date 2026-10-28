@@ -511,7 +511,7 @@ enum Command {
     static func fileData(_ project: Project, path: String) -> (Data?, String) {
         let limit = 15_000_000
         if project.isRemote {
-            let python = "import os,sys,base64; root=os.path.realpath(sys.argv[1]); p=os.path.realpath(sys.argv[2]); assert os.path.commonpath([root,p])==root, 'Outside project'; assert os.path.getsize(p)<=15000000, 'File is larger than 15 MB'; sys.stdout.write(base64.b64encode(open(p,'rb').read()).decode('ascii'))"
+            let python = FileBrowserIO.remotePreviewScript
             let command = "python3 -c " + shellQuote(python) + " " + shellQuote(project.path) + " " + shellQuote(path)
             let (output, error, status) = ssh(project.host, command, maxOutput: 21_000_000)
             guard status == 0 else { return (nil, error.isEmpty ? "Could not read remote file" : error) }

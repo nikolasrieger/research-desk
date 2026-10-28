@@ -2,6 +2,42 @@ import XCTest
 @testable import ResearchDesk
 
 final class FileDownloadsTests: XCTestCase {
+    func testRemotePreviewPathsAndSymlinkDiagnostics() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("project")
+        let nested = project.appendingPathComponent("plots/nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let png = nested.appendingPathComponent("plot 'one.png")
+        let bytes = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        try bytes.write(to: png)
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: project)
+        func preview(_ base: String, _ path: String) -> (String, String, Int32) {
+            Command.run("/usr/bin/python3", ["-c", FileBrowserIO.remotePreviewScript, base, path])
+        }
+        let normal = preview(project.path, png.path)
+        XCTAssertEqual(normal.2, 0, normal.1)
+        XCTAssertEqual(Data(base64Encoded: normal.0), bytes)
+        let aliased = preview(alias.path, alias.appendingPathComponent("plots/nested/plot 'one.png").path)
+        XCTAssertEqual(aliased.2, 0, aliased.1)
+        XCTAssertEqual(Data(base64Encoded: aliased.0), bytes)
+        let outside = root.appendingPathComponent("outside.png")
+        try bytes.write(to: outside)
+        let link = nested.appendingPathComponent("linked.png")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let rejected = preview(project.path, link.path)
+        XCTAssertNotEqual(rejected.2, 0)
+        XCTAssertTrue(rejected.1.contains("Requested file: " + link.path))
+        func resolved(_ label: String) -> String? {
+            guard let line = rejected.1.components(separatedBy: "\n").first(where: { $0.hasPrefix(label) }) else { return nil }
+            return URL(fileURLWithPath: String(line.dropFirst(label.count))).resolvingSymlinksInPath().path
+        }
+        XCTAssertEqual(resolved("Resolved file: "), outside.resolvingSymlinksInPath().path)
+        XCTAssertEqual(resolved("Resolved project: "), project.resolvingSymlinksInPath().path)
+        XCTAssertFalse(rejected.1.contains("Traceback"))
+    }
+
     func testDownloadsPreserveBytesAndExistingFilesBeyondPreviewLimit() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
