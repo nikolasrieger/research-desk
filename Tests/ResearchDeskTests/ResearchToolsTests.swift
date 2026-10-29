@@ -52,7 +52,11 @@ final class ResearchToolsTests: XCTestCase {
         let projects = folder.appendingPathComponent("projects/workspace")
         try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
         let session = UUID().uuidString.lowercased()
-        let url = "https://claude.ai/code/artifact/abc-123"
+        let url = "https://claude.ai/artifact/HfYSDC9AY1TRQ3XBruBHCd"
+        XCTAssertEqual(ArtifactLink.parse(url)?.absoluteString, url)
+        for path in ["code/artifact", "public/artifacts", "artifacts"] {
+            XCTAssertNotNil(ArtifactLink.parse("https://claude.ai/\(path)/abc-123"))
+        }
         let records: [[String: Any]] = [
             ["type": "assistant", "message": ["content": "Created: \(url)"]],
             ["type": "user", "message": ["content": "https://claude.ai/code/artifact/not-created"]]

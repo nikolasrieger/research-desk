@@ -6,7 +6,7 @@ enum ArtifactLink {
               url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
               url.port == nil || url.port == 443, let host = url.host?.lowercased() else { return nil }
         if host == "claude.ai" {
-            let pattern = #"^/(?:code/artifact|public/artifacts|artifacts)/[A-Za-z0-9_-]+/?$"#
+            let pattern = #"^/(?:code/artifact|public/artifacts|artifacts?)/[A-Za-z0-9_-]+/?$"#
             guard url.path.range(of: pattern, options: .regularExpression) != nil else { return nil }
         } else if host.hasSuffix(".claude.site") {
             guard host != ".claude.site" else { return nil }
@@ -92,7 +92,7 @@ def inspect(value):
             raw = raw.rstrip(').,;]}\'')
             u = urlparse(raw)
             host = (u.hostname or '').lower()
-            valid = (host == 'claude.ai' and re.fullmatch(r'/(?:code/artifact|public/artifacts|artifacts)/[A-Za-z0-9_-]+/?', u.path)) or host.endswith('.claude.site')
+            valid = (host == 'claude.ai' and re.fullmatch(r'/(?:code/artifact|public/artifacts|artifacts?)/[A-Za-z0-9_-]+/?', u.path)) or host.endswith('.claude.site')
             if valid and not u.username and not u.password:
                 latest = raw
     elif isinstance(value, list):
