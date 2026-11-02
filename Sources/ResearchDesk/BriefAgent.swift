@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import AppKit
 
@@ -141,7 +140,7 @@ struct BriefAttachment: Identifiable {
     let text: String
 }
 
-/// Shared across project-tab switches; release builds never contain this store.
+/// Shared conversation state across project-tab switches.
 @MainActor final class BriefAgentStore: ObservableObject {
     static let shared = BriefAgentStore()
     private var sessions: [UUID: BriefAgentModel] = [:]
@@ -1203,4 +1202,3 @@ struct BriefAgentView: View {
         selected.removeAll()
     }
 }
-#endif

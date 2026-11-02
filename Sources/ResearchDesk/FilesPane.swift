@@ -113,6 +113,42 @@ enum FileBrowserIO {
         }
     }
 
+    static func uncommittedPaths(_ project: Project) -> Set<String> {
+        let command = "python3 -c " + Command.shellQuote(gitStatusScript) + " " + Command.shellQuote(project.path)
+        let result = project.isRemote ? Command.ssh(project.host, command, maxOutput: 2_000_000) : Command.run("/bin/zsh", ["-c", command], maxOutput: 2_000_000)
+        guard result.2 == 0, let paths = try? JSONDecoder().decode([String].self, from: Data(result.0.utf8)) else { return [] }
+        return Set(paths)
+    }
+    static func isUncommitted(_ path: String, directory: Bool, changes: Set<String>) -> Bool {
+        changes.contains(path) || (directory && changes.contains { $0.hasPrefix(path.hasSuffix("/") ? path : path + "/") })
+    }
+    static let gitStatusScript = #"""
+import os, subprocess, sys, json
+project = os.path.abspath(sys.argv[1])
+root = subprocess.run(['git', '-C', project, 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+if root.returncode:
+    print('[]'); sys.exit(0)
+root = os.fsdecode(root.stdout).rstrip('\n')
+status = subprocess.run(['git', '-C', project, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+if status.returncode:
+    print('[]'); sys.exit(0)
+entries = status.stdout.split(b'\0')
+paths = set()
+i = 0
+while i < len(entries):
+    entry = entries[i]; i += 1
+    if len(entry) < 4: continue
+    names = [entry[3:]]
+    if b'R' in entry[:2] or b'C' in entry[:2]:
+        if i < len(entries): names.append(entries[i]); i += 1
+    for name in names:
+        absolute = os.path.join(root, os.fsdecode(name))
+        relative = os.path.relpath(absolute, os.path.realpath(project))
+        if relative == '..' or relative.startswith('../'): continue
+        paths.add(os.path.normpath(os.path.join(project, relative)))
+print(json.dumps(sorted(paths)))
+"""#
+
     static func listing(_ project: Project, path: String) -> (RemoteListing?, String) {
         if project.isRemote { return Command.remoteListing(host: project.host, path: path) }
         let directory = URL(fileURLWithPath: path)
@@ -165,6 +201,8 @@ struct FilePreview: Sendable {
     @Published var downloading = false
     @Published var downloadMessage = ""
     @Published var downloadedURL: URL?
+    @Published var uncommittedPaths: Set<String> = []
+    private var loadingGit = false
     private var requestID = UUID()
 
     func download(path: String) {
@@ -195,6 +233,17 @@ struct FilePreview: Sendable {
         load(project.path)
     }
 
+    func refreshGitStatus() {
+        guard !loadingGit else { return }
+        loadingGit = true
+        let project = project
+        Task { [weak self] in
+            let changes = await Task.detached { FileBrowserIO.uncommittedPaths(project) }.value
+            self?.uncommittedPaths = changes
+            self?.loadingGit = false
+        }
+    }
+
     var canGoUp: Bool { directory != project.path }
 
     func up() {
@@ -209,6 +258,7 @@ struct FilePreview: Sendable {
 
     func load(_ path: String) {
         guard FileBrowserIO.containsPath(path, in: project.path) else { return }
+        refreshGitStatus()
         requestID = UUID()
         let request = requestID
         loading = true
@@ -275,8 +325,31 @@ struct FilePreview: Sendable {
     }
 }
 
+private struct FilePathHoverTarget {
+    let path: String
+    let bounds: Anchor<CGRect>
+}
+private struct FilePathHoverPreference: PreferenceKey {
+    static var defaultValue: [String: FilePathHoverTarget] { [:] }
+    static func reduce(value: inout [String: FilePathHoverTarget], nextValue: () -> [String: FilePathHoverTarget]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+private extension View {
+    func filePathHover(_ path: String, id: String, hovered: Binding<String?>) -> some View {
+        self.contentShape(Rectangle())
+            .onHover { inside in
+                if inside { hovered.wrappedValue = id }
+                else if hovered.wrappedValue == id { hovered.wrappedValue = nil }
+            }
+            .anchorPreference(key: FilePathHoverPreference.self, value: .bounds) { [id: FilePathHoverTarget(path: path, bounds: $0)] }
+            .accessibilityHint(path)
+    }
+}
+
 struct FilesPane: View {
     @ObservedObject var browser: FileBrowserModel
+    @State private var hoveredPathID: String?
 
     private var visibleEntries: [RemoteEntry] {
         guard !browser.search.isEmpty else { return browser.entries }
@@ -284,13 +357,14 @@ struct FilesPane: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HSplitView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 6) {
                     Button { browser.up() } label: { Image(systemName: "arrow.left") }
                         .buttonStyle(DeskButtonStyle(compact: true)).disabled(!browser.canGoUp).help("Parent folder")
                     Text(browser.directory == browser.project.path ? browser.project.name : URL(fileURLWithPath: browser.directory).lastPathComponent)
                         .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        .filePathHover(fullPath(browser.directory), id: "folder", hovered: $hoveredPathID)
                     Spacer(minLength: 0)
                     Button { browser.load(browser.directory) } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(DeskButtonStyle(compact: true)).help("Refresh files")
@@ -309,10 +383,15 @@ struct FilesPane: View {
                                     Text(entry.name).font(.system(size: 12)).lineLimit(1)
                                     Spacer()
                                     if entry.directory { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(DeskStyle.muted) }
+                                    if FileBrowserIO.isUncommitted(path, directory: entry.directory, changes: browser.uncommittedPaths) {
+                                        Circle().fill(Color.gray).frame(width: 5, height: 5)
+                                            .help("Uncommitted changes").accessibilityLabel("Uncommitted changes")
+                                    }
                                 }.padding(.horizontal, 8).padding(.vertical, 5)
                                     .background(browser.selectedPath == path ? DeskStyle.raised : Color.clear,
                                                 in: RoundedRectangle(cornerRadius: 4))
                             }.buttonStyle(.plain)
+                                .filePathHover(fullPath(path), id: "file:" + path, hovered: $hoveredPathID)
                                 .contextMenu {
                                     if !entry.directory {
                                         Button("Download to Downloads") { browser.download(path: path) }.disabled(browser.downloading)
@@ -333,19 +412,45 @@ struct FilesPane: View {
                 }
                 if browser.loading { ProgressView().controlSize(.small) }
                 if !browser.error.isEmpty { Text(browser.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-            }.frame(width: 210).padding(12).background(DeskStyle.surface)
-            Rectangle().fill(DeskStyle.edge).frame(width: 1)
-            previewPane
+            }.padding(12).frame(minWidth: 150, idealWidth: 234, maxWidth: .infinity, maxHeight: .infinity)
+                .background(DeskStyle.surface)
+            previewPane.frame(minWidth: 220, idealWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DeskStyle.background)
+        .task { browser.refreshGitStatus() }
+        .onChange(of: browser.directory) { _, _ in hoveredPathID = nil }
+        .onDisappear { hoveredPathID = nil }
+        .overlayPreferenceValue(FilePathHoverPreference.self) { targets in
+            GeometryReader { geometry in
+                if let id = hoveredPathID, let target = targets[id] {
+                    let bounds = geometry[target.bounds]
+                    let width = min(560, max(180, geometry.size.width - 24))
+                    Text(target.path)
+                        .font(.system(size: 11)).foregroundStyle(DeskStyle.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 11).padding(.vertical, 8)
+                        .frame(width: width, alignment: .leading)
+                        .background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(DeskStyle.edge))
+                        .shadow(color: .black.opacity(0.4), radius: 8, y: 3)
+                        .offset(x: min(max(8, bounds.minX), max(8, geometry.size.width - width - 12)),
+                                y: max(8, min(bounds.maxY + 5, geometry.size.height - 110)))
+                        .allowsHitTesting(false)
+                }
+            }.allowsHitTesting(false)
+        }
+    }
+
+    private func fullPath(_ path: String) -> String {
+        browser.project.isRemote ? browser.project.host + ":" + path : path
     }
 
     @ViewBuilder private var previewPane: some View {
         if let preview = browser.preview {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text(preview.name).font(.system(size: 13, weight: .semibold))
+                    Text(preview.name).font(.system(size: 13, weight: .semibold)).filePathHover(fullPath(preview.path), id: "preview", hovered: $hoveredPathID)
                     Spacer()
                     if ["md", "markdown"].contains(URL(fileURLWithPath: preview.name).pathExtension.lowercased()) {
                         Picker("Markdown view", selection: $browser.renderMarkdown) {
