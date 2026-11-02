@@ -1,7 +1,7 @@
 import SwiftUI
 
 private struct MarkdownBlock: Identifiable {
-    enum Kind { case heading(Int), paragraph, bullet, quote, code, rule }
+    enum Kind { case heading(Int), paragraph, bullet, quote, code, rule, table([[String]]) }
     let id: Int
     let kind: Kind
     let text: String
@@ -9,6 +9,7 @@ private struct MarkdownBlock: Identifiable {
 
 struct MarkdownPreview: View {
     let source: String
+    var rendersTables = false
 
     private var blocks: [MarkdownBlock] {
         let lines = source.components(separatedBy: .newlines)
@@ -25,7 +26,25 @@ struct MarkdownPreview: View {
                 paragraph.removeAll()
             }
         }
-        for raw in lines {
+        var position = 0
+        while position < lines.count {
+            let raw = lines[position]
+            if rendersTables, !inCode, let table = MarkdownTableParser.parse(lines, at: position) {
+                flushParagraph()
+                append(.table(table.rows), "")
+                position += table.consumed
+                continue
+            }
+            if rendersTables, !inCode, MarkdownTableParser.isTerminalBorder(raw) {
+                flushParagraph()
+                var terminal: [String] = []
+                while position < lines.count, MarkdownTableParser.isTerminalRow(lines[position]) {
+                    terminal.append(lines[position]); position += 1
+                }
+                append(.code, terminal.joined(separator: "\n"))
+                continue
+            }
+            position += 1
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("```") {
                 flushParagraph()
@@ -85,10 +104,31 @@ struct MarkdownPreview: View {
                             inline(block.text).font(.system(size: 14)).foregroundStyle(DeskStyle.muted)
                         }.padding(.vertical, 3)
                     case .code:
-                        Text(block.text).font(.system(size: 12, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(15)
-                            .background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
+                        if rendersTables {
+                            ScrollView(.horizontal) {
+                                Text(block.text).font(.system(size: 12, design: .monospaced))
+                                    .fixedSize(horizontal: true, vertical: false).padding(15)
+                            }.background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
+                        } else {
+                            Text(block.text).font(.system(size: 12, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(15)
+                                .background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    case .table(let rows):
+                        ScrollView(.horizontal) {
+                            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                                    GridRow {
+                                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                            inline(cell).font(.system(size: 12, weight: rowIndex == 0 ? .semibold : .regular))
+                                                .frame(minWidth: 80, maxWidth: 280, alignment: .leading).padding(10)
+                                                .background(rowIndex == 0 ? DeskStyle.raised : DeskStyle.surface)
+                                                .overlay(Rectangle().stroke(DeskStyle.edge, lineWidth: 0.5))
+                                        }
+                                    }
+                                }
+                            }.fixedSize(horizontal: true, vertical: false)
+                        }
                     case .rule:
                         Rectangle().fill(DeskStyle.edge).frame(height: 1).padding(.vertical, 4)
                     }
@@ -106,5 +146,48 @@ struct MarkdownPreview: View {
             return Text(value)
         }
         return Text(source)
+    }
+}
+
+/// Pipe tables keep cell boundaries; terminal box-drawing tables retain monospace alignment.
+enum MarkdownTableParser {
+    static func cells(_ line: String) -> [String] {
+        var source = line.trimmingCharacters(in: .whitespaces)
+        if source.hasPrefix("|") { source.removeFirst() }
+        if source.hasSuffix("|"), !source.hasSuffix("\\|") { source.removeLast() }
+        var result: [String] = [], cell = ""
+        var escaped = false, inCode = false
+        for character in source {
+            if escaped { cell.append(character); escaped = false; continue }
+            if character == "\\" { escaped = true; continue }
+            if character == "`" { inCode.toggle(); cell.append(character); continue }
+            if character == "|", !inCode { result.append(cell.trimmingCharacters(in: .whitespaces)); cell = "" }
+            else { cell.append(character) }
+        }
+        if escaped { cell.append("\\") }
+        result.append(cell.trimmingCharacters(in: .whitespaces))
+        return result
+    }
+    static func parse(_ lines: [String], at index: Int) -> (rows: [[String]], consumed: Int)? {
+        guard index + 1 < lines.count, lines[index].contains("|") else { return nil }
+        let header = cells(lines[index]), separators = cells(lines[index + 1])
+        guard header.count >= 2, separators.count == header.count,
+              separators.allSatisfy({ $0.range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil }) else { return nil }
+        var rows = [header], cursor = index + 2
+        while cursor < lines.count, lines[cursor].contains("|"), !lines[cursor].trimmingCharacters(in: .whitespaces).isEmpty {
+            let row = cells(lines[cursor])
+            guard row.count == header.count else { break }
+            rows.append(row); cursor += 1
+        }
+        return (rows, cursor - index)
+    }
+    static func isTerminalBorder(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return ["┌", "╔", "╭", "┏", "┍"].contains(where: { trimmed.hasPrefix($0) }) ||
+            (trimmed.hasPrefix("+") && trimmed.contains("---") && trimmed.hasSuffix("+"))
+    }
+    static func isTerminalRow(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && ["│", "┃", "║", "┌", "┐", "└", "┘", "├", "┤", "┼", "╭", "╰", "╔", "╚", "╠", "┏", "┗", "┣", "┍", "+", "|"].contains(where: { trimmed.hasPrefix($0) })
     }
 }

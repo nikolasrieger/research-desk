@@ -973,12 +973,16 @@ enum Command {
                                             }
                                         }
                                         Spacer(minLength: 2)
+#if DEBUG
+                                        BriefSidebarActivity(project: project, legacyRunning: model.sessions[project.id]?.ended == false)
+#else
                                         if let session = model.sessions[project.id], !session.ended {
                                             Circle().fill(DeskStyle.running).frame(width: 5, height: 5)
                                         } else if let snapshot = model.snapshots[project.id], snapshot.changes > 0 {
                                             Text("\(snapshot.changes)").font(.system(size: 10, design: .monospaced))
                                                 .foregroundStyle(DeskStyle.muted).help("Uncommitted changes")
                                         }
+#endif
                                     }
                                     .padding(.horizontal, 12).padding(.vertical, 11)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1207,7 +1211,15 @@ struct ProjectDetail: View {
         DeskTab(title: title, selected: tab == index) { model.projectTabs[project.id] = index }
     }
 
-    private var agent: some View {
+    @ViewBuilder private var agent: some View {
+#if DEBUG
+        BriefAgentPane(project: project, model: model)
+#else
+        legacyAgent
+#endif
+    }
+
+    private var legacyAgent: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let session = model.sessions[project.id] {
                 AgentConsole(session: session,
