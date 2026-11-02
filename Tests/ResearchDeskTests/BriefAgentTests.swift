@@ -241,18 +241,25 @@ print(json.dumps({'type':'result','result':'Finished'}), flush=True)
 #!/usr/bin/python3
 import sys, json, os
 with open('starts.log', 'a') as f: f.write(str(os.getpid()) + '\n')
+assert sys.argv[sys.argv.index('--model') + 1] == 'opus'
 init = json.loads(sys.stdin.readline())
 print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':init['request_id'],'response':{}}}), flush=True)
-print(json.dumps({'type':'system','subtype':'init','session_id':sys.argv[-1]}), flush=True)
+print(json.dumps({'type':'system','subtype':'init','session_id':sys.argv[sys.argv.index('--session-id') + 1]}), flush=True)
 for raw in sys.stdin:
     message = json.loads(raw)
-    if message.get('type') == 'user':
+    if message.get('type') == 'control_request':
+        assert message['request']['subtype'] == 'set_model'
+        rejected = message['request']['model'] == 'unavailable'
+        print(json.dumps({'type':'control_response','response':{'subtype':'error' if rejected else 'success','request_id':message['request_id'],'error':'Model unavailable' if rejected else '', 'response':{}}}), flush=True)
+    elif message.get('type') == 'user':
         print(json.dumps({'type':'result','is_error':False,'result':'Answer: ' + message['message']['content']}), flush=True)
 """#
         try source.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let model = BriefAgentModel(project: Project(name: "Test", path: folder.path), executableOverride: executable.path)
         defer { model.stop() }
+        model.chooseModel("opus")
+        XCTAssertEqual(model.selectedModel, "opus")
         model.instruction = "First instruction"
         model.send()
         for _ in 0..<100 {
@@ -261,6 +268,19 @@ for raw in sys.stdin:
         }
         XCTAssertEqual(model.replies.count, 1, model.error)
         XCTAssertFalse(model.running)
+        model.chooseModel("sonnet")
+        for _ in 0..<100 {
+            if !model.changingModel { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.selectedModel, "sonnet", model.error)
+        model.chooseModel("unavailable")
+        for _ in 0..<100 {
+            if !model.changingModel { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.selectedModel, "sonnet")
+        XCTAssertTrue(model.error.contains("Model unavailable"))
         model.instruction = "Follow-up"
         model.send()
         for _ in 0..<100 {
@@ -302,6 +322,21 @@ for raw in sys.stdin:
         first.index = first.replies.count - 1
         first.markLatestRead()
         XCTAssertEqual(store.activity(for: project), .idle)
+    }
+
+    @MainActor
+    func testModelSelectionValidationAndRunningGuard() {
+        XCTAssertTrue(BriefAgentModel.validModel(""))
+        XCTAssertTrue(BriefAgentModel.validModel("sonnet"))
+        XCTAssertTrue(BriefAgentModel.validModel("sonnet[1m]"))
+        XCTAssertFalse(BriefAgentModel.validModel("--bad-flag"))
+        XCTAssertFalse(BriefAgentModel.validModel("model with spaces"))
+        let model = BriefAgentModel(project: Project(name: "Test", path: "/tmp"))
+        model.chooseModel("haiku")
+        XCTAssertEqual(model.selectedModelName, "Haiku")
+        model.running = true
+        model.chooseModel("opus")
+        XCTAssertEqual(model.selectedModel, "haiku")
     }
 
     func testChangesIncludeStagedUnstagedAndUntracked() throws {

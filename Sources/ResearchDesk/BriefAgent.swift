@@ -9,9 +9,10 @@ final class BriefTransport: @unchecked Sendable {
     private let input = Pipe(), output = Pipe(), errors = Pipe()
     private let writes = DispatchQueue(label: "researchdesk.brief.stdin")
 
-    func run(project: Project, executable: String?, sessionID: String, resume: Bool) throws -> AsyncStream<Event> {
-        let args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+    func run(project: Project, executable: String?, sessionID: String, resume: Bool, model: String = "") throws -> AsyncStream<Event> {
+        var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                     "--permission-prompt-tool", "stdio", "--permission-mode", "auto", resume ? "--resume" : "--session-id", sessionID]
+        if !model.isEmpty { args += ["--model", model] }
         if project.isRemote {
             let command = (["claude"] + args).map(Command.shellQuote).joined(separator: " ")
             let remote = "cd " + Command.shellQuote(project.path) + " && exec \"${SHELL:-/bin/bash}\" -lic " + Command.shellQuote(command)
@@ -108,6 +109,12 @@ struct BriefFinalResponse {
         let result = text.keys.sorted().compactMap { text[$0] }.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? nil : result
     }
+}
+
+struct BriefModelOption: Identifiable, Equatable {
+    let id: String
+    let name: String
+    static let defaults = [BriefModelOption(id: "", name: "Default"), BriefModelOption(id: "sonnet", name: "Sonnet"), BriefModelOption(id: "opus", name: "Opus"), BriefModelOption(id: "haiku", name: "Haiku")]
 }
 
 struct BriefReply: Identifiable {
@@ -221,6 +228,14 @@ struct BriefAttachment: Identifiable {
     private let executableOverride: String?
     let id = UUID()
     @Published var title = "New conversation"
+    @Published private(set) var selectedModel = ""
+    @Published private(set) var modelOptions = BriefModelOption.defaults
+    @Published private(set) var changingModel = false
+    @Published private(set) var activeModel = ""
+    private var pendingModelChange: (id: String, model: String)?
+    var selectedModelName: String {
+        modelOptions.first { $0.id == selectedModel }?.name ?? BriefModelOption.defaults.first { $0.id == selectedModel }?.name ?? selectedModel
+    }
     @Published var interrupted = false
     @Published var replies: [BriefReply] = []
     @Published var index = 0
@@ -252,7 +267,7 @@ struct BriefAttachment: Identifiable {
         self.project = project
         self.executableOverride = executableOverride
     }
-    var canContinue: Bool { resume && interrupted && !running && !loadingHistory }
+    var canContinue: Bool { resume && interrupted && !running && !loadingHistory && !changingModel }
     var current: BriefReply? { replies.indices.contains(index) ? replies[index] : nil }
 
     func useSession(_ saved: SavedAgentSession) {
@@ -295,7 +310,7 @@ struct BriefAttachment: Identifiable {
     }
     func send() {
         let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !running, !loadingHistory, !reloading, !text.isEmpty else { return }
+        guard !running, !loadingHistory, !reloading, !changingModel, !text.isEmpty else { return }
         let prompt = Self.prompt(text, attachments: attachments)
         guard prompt.utf8.count < 512_000 else { error = "Instruction and selected context exceed 512 KB. Select fewer lines."; return }
         error = ""; permissions = []; progress = []; seenToolIDs.removeAll(); running = true; receivedResult = false; resultFailed = false; finalResponse = BriefFinalResponse()
@@ -315,7 +330,7 @@ struct BriefAttachment: Identifiable {
         }
         let connection = BriefTransport()
         do {
-            let events = try connection.run(project: project, executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable("claude")), sessionID: sessionID, resume: resume)
+            let events = try connection.run(project: project, executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable("claude")), sessionID: sessionID, resume: resume, model: selectedModel)
             transport = connection
             queuedPrompt = prompt
             connection.send(["type": "control_request", "request_id": initializationID,
@@ -336,6 +351,8 @@ struct BriefAttachment: Identifiable {
                             interrupted = !receivedResult || resultFailed
                         }
                         running = false; permissions.removeAll(); transport = nil
+                        if changingModel { error = "Connection ended while changing the model." }
+                        changingModel = false; pendingModelChange = nil
                         status = interrupted ? "Connection ended before completion" : "Disconnected · reconnects on the next instruction"
                         refreshChanges()
                     }
@@ -343,6 +360,38 @@ struct BriefAttachment: Identifiable {
             }
         } catch { running = false; self.error = error.localizedDescription; status = "Could not start Claude" }
     }
+    static func validModel(_ model: String) -> Bool {
+        model.isEmpty || (model.utf8.count <= 256 && model.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$"#, options: .regularExpression) != nil)
+    }
+    func chooseModel(_ value: String) {
+        let model = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !running, !loadingHistory, !reloading, !changingModel else { return }
+        guard Self.validModel(model) else { error = "Enter a model alias or ID without spaces or control characters."; return }
+        guard model != selectedModel else { return }
+        guard let transport, transport.process.isRunning else { selectedModel = model; return }
+        let id = UUID().uuidString
+        pendingModelChange = (id, model)
+        changingModel = true
+        transport.send(["type": "control_request", "request_id": id, "request": ["subtype": "set_model", "model": model.isEmpty ? NSNull() : model as Any]])
+        Task {
+            try? await Task.sleep(for: .seconds(15))
+            if pendingModelChange?.id == id {
+                pendingModelChange = nil; changingModel = false
+                error = "Claude did not acknowledge the model change. The connection was closed; retry your selection before sending."
+                transport.stop()
+            }
+        }
+    }
+    private func updateModels(_ response: [String: Any]) {
+        guard let models = response["models"] as? [[String: Any]], !models.isEmpty else { return }
+        var options = [BriefModelOption(id: "", name: "Default")]
+        for model in models {
+            guard let value = model["value"] as? String, Self.validModel(value), !options.contains(where: { $0.id == value }) else { continue }
+            options.append(BriefModelOption(id: value, name: model["displayName"] as? String ?? value))
+        }
+        if options.count > 1 { modelOptions = options }
+    }
+
     @Published var reloading = false
     func reload() {
         guard !reloading, !loadingHistory else { return }
@@ -392,11 +441,24 @@ struct BriefAttachment: Identifiable {
         guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { return }
         switch type {
         case "control_response":
+            if let response = event["response"] as? [String: Any], let pending = pendingModelChange,
+               response["request_id"] as? String == pending.id {
+                changingModel = false; pendingModelChange = nil
+                if response["subtype"] as? String == "error" {
+                    error = "Could not change model: " + (response["error"] as? String ?? "Claude rejected the selection.")
+                } else {
+                    selectedModel = pending.model
+                    activeModel = pending.model
+                    log("Model changed to " + selectedModelName)
+                }
+                return
+            }
             if let response = event["response"] as? [String: Any], response["request_id"] as? String == initializationID {
                 if response["subtype"] as? String == "error" {
                     error = response["error"] as? String ?? "Could not initialize Claude Code."
                     transport?.stop()
                 } else if let prompt = queuedPrompt {
+                    if let details = response["response"] as? [String: Any] { updateModels(details) }
                     queuedPrompt = nil
                     transport?.send(["type": "user", "message": ["role": "user", "content": prompt]])
                 }
@@ -406,11 +468,13 @@ struct BriefAttachment: Identifiable {
         case "system":
             if event["subtype"] as? String == "init" {
                 if let id = event["session_id"] as? String { sessionID = id }
+                if let model = event["model"] as? String { activeModel = model }
                 resume = true; status = "Claude is working…"; log("Connected to Claude Code")
             } else if let subtype = event["subtype"] as? String { log(subtype.replacingOccurrences(of: "_", with: " ")) }
         case "assistant":
             finalResponse.observe(event)
             let message = event["message"] as? [String: Any]
+            if event["parent_tool_use_id"] as? String == nil, let model = message?["model"] as? String { activeModel = model }
             for block in message?["content"] as? [[String: Any]] ?? [] where block["type"] as? String == "tool_use" {
                 if let id = block["id"] as? String, !seenToolIDs.insert(id).inserted { continue }
                 let name = block["name"] as? String ?? "Tool"
@@ -823,6 +887,35 @@ private struct BriefChatRow: View {
     }
 }
 
+private struct BriefInstructionPreview: View {
+    let source: String
+    @State private var expanded = false
+    private var preview: String {
+        if source.contains("<task-notification>") {
+            if let start = source.range(of: "<summary>"), let end = source.range(of: "</summary>", range: start.upperBound..<source.endIndex) {
+                return String(source[start.upperBound..<end.lowerBound])
+            }
+            return "Background task notification"
+        }
+        return source.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+    }
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ScrollView {
+                Text(source).font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+            }.frame(maxHeight: 180)
+        } label: {
+            HStack(spacing: 10) {
+                Text("Last message").font(.system(size: 11, weight: .medium))
+                if !expanded {
+                    Text(preview).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+                }
+            }.foregroundStyle(DeskStyle.muted)
+        }.padding(.horizontal, 20).padding(.vertical, 12)
+    }
+}
+
 struct BriefAgentView: View {
     @ObservedObject var session: BriefAgentModel
     @ObservedObject var model: DeskModel
@@ -836,6 +929,8 @@ struct BriefAgentView: View {
     @State private var historyExpanded = false
     @State private var inputWidth: CGFloat = 400
     @State private var responseVisible = false
+    @State private var customModel = ""
+    @State private var showCustomModel = false
     private var file: BriefChangedFile? { session.changes.first { $0.id == fileID } ?? session.changes.first }
 
     var body: some View {
@@ -857,8 +952,7 @@ struct BriefAgentView: View {
                 VStack(spacing: 0) {
                     responseNavigation
                     if let reply = session.current {
-                        Text(reply.instruction).font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
-                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(20)
+                        BriefInstructionPreview(source: reply.instruction).id(reply.id)
                         MarkdownPreview(source: reply.markdown, rendersTables: true).id(reply.id)
                     } else {
                         VStack(alignment: .leading, spacing: 14) {
@@ -948,6 +1042,7 @@ struct BriefAgentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(DeskStyle.edge))
                 .accessibilityLabel("Instruction to Claude Code")
             HStack(spacing: 8) {
+                modelSelector
                 Spacer(minLength: 0)
                 Button {
                     dictation.toggle { text in
@@ -964,11 +1059,43 @@ struct BriefAgentView: View {
                 .help("Transcribe on this Mac and add to your draft without sending")
                 Button("Send instruction", systemImage: "arrow.up") { session.send() }
                     .buttonStyle(DeskButtonStyle(prominent: true))
-                    .disabled(session.running || session.reloading || session.loadingHistory || dictation.recording || dictation.busy || session.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.sessions[session.project.id]?.ended == false)
+                    .disabled(session.running || session.changingModel || session.reloading || session.loadingHistory || dictation.recording || dictation.busy || session.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.sessions[session.project.id]?.ended == false)
                     .keyboardShortcut(.return, modifiers: .command)
             }
         }.padding(16).background { DeskMetalSurface() }
     }
+    private var modelSelector: some View {
+        Menu {
+            ForEach(session.modelOptions) { option in
+                Button { session.chooseModel(option.id) } label: {
+                    if session.selectedModel == option.id { Label(option.name, systemImage: "checkmark") }
+                    else { Text(option.name) }
+                }
+            }
+            Divider()
+            Button("Custom model…") { customModel = session.selectedModel; showCustomModel = true }
+        } label: {
+            DeskMenuLabel(title: session.changingModel ? "Changing model…" : session.selectedModelName)
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .disabled(session.running || session.changingModel || session.loadingHistory || session.reloading)
+        .help(session.activeModel.isEmpty ? "Choose the Claude model for this conversation" : "Active model: " + session.activeModel)
+        .popover(isPresented: $showCustomModel) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Claude model").font(.headline)
+                TextField("Model alias or full model ID", text: $customModel).textFieldStyle(DeskFieldStyle()).frame(width: 300)
+                    .onSubmit { session.chooseModel(customModel); showCustomModel = false }
+                Text("Use an ID supported by Claude Code on this machine or provider.").font(.caption).foregroundStyle(DeskStyle.muted)
+                HStack {
+                    Button("Cancel") { showCustomModel = false }
+                    Spacer()
+                    Button("Use model") { session.chooseModel(customModel); showCustomModel = false }
+                        .disabled(!BriefAgentModel.validModel(customModel.trimmingCharacters(in: .whitespacesAndNewlines)))
+                }.buttonStyle(DeskButtonStyle())
+            }.padding(18).background(DeskStyle.surface)
+        }
+    }
+
     private var inspectorPane: some View {
         VStack(spacing: 14) {
             HStack(spacing: 6) {
