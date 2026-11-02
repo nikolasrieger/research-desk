@@ -283,6 +283,7 @@ enum AgentLocator {
     let project: Project
     let agent: String
     let resumeID: String?
+    var resumeLatest = false
     let claudeSessionID: String
     var artifactURL: URL?
     let resumeWorkspace: String?
@@ -321,7 +322,7 @@ enum AgentLocator {
             .compactMap { $0 }.joined(separator: ":")
         environment.append("PATH=" + paths)
         environment.append("SHELL=/bin/zsh")
-        let agentArguments = resumeID.map { agent == "codex" ? ["resume", $0] : ["--resume", $0] } ?? (agent == "claude" ? ["--session-id", claudeSessionID] : [])
+        let agentArguments = resumeLatest && agent == "codex" ? ["resume", "--last"] : resumeID.map { agent == "codex" ? ["resume", $0] : ["--resume", $0] } ?? (agent == "claude" ? ["--session-id", claudeSessionID] : [])
         let workingDirectory = resumeWorkspace.flatMap { $0.hasPrefix("/") ? $0 : nil } ?? project.path
         if agent == "terminal" {
             if project.isRemote {
@@ -338,6 +339,37 @@ enum AgentLocator {
             let bundledCodex = agent == "codex" && executable.contains("/.vscode") && executable.contains("/extensions/openai.chatgpt-")
             terminal.startProcess(executable: executable, args: (bundledCodex ? ["--no-daemon"] : []) + agentArguments, environment: environment, currentDirectory: workingDirectory)
         }
+    }
+
+    /// Replace an exited transport, retaining the saved agent conversation.
+    func reloadedSession() -> AgentSession? {
+        guard ended else { return nil }
+        let id = agent == "claude" ? claudeSessionID : resumeID
+        let replacement = AgentSession(project: project, agent: agent, executable: executable,
+                                       resumeID: id, resumeWorkspace: resumeWorkspace)
+        replacement.resumeLatest = agent == "codex" && id == nil
+        replacement.artifactURL = artifactURL
+        return replacement
+    }
+
+    /// Reap a stale SSH transport before creating a replacement terminal.
+    func reconnect() async -> AgentSession? {
+        if !ended {
+            stop()
+            for _ in 0..<30 {
+                if ended { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if !ended {
+                let pid = terminal.process?.shellPid ?? 0
+                if pid > 0 { Darwin.kill(pid, SIGKILL) }
+                for _ in 0..<20 {
+                    if ended { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+        }
+        return reloadedSession()
     }
 
     func stop() {
@@ -1183,7 +1215,13 @@ struct ProjectDetail: View {
                              newSession: {
                     model.sessions.removeValue(forKey: project.id)
                     model.refreshHistory(project)
-                }, viewArtifact: { model.projectTabs[project.id] = 5 })
+                }, viewArtifact: { model.projectTabs[project.id] = 5 }, reloadSession: {
+                    Task { @MainActor in
+                        if let replacement = await session.reconnect(), model.sessions[project.id] === session {
+                            model.sessions[project.id] = replacement
+                        }
+                    }
+                })
             } else {
                 ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 20) {
@@ -1361,9 +1399,11 @@ struct ProjectDetail: View {
 struct AgentConsole: View {
     @ObservedObject var session: AgentSession
     @StateObject private var dictation = ConsoleDictation()
+    @State private var reloading = false
     let stopSession: () -> Void
     let newSession: () -> Void
     var viewArtifact: (() -> Void)? = nil
+    var reloadSession: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1400,6 +1440,22 @@ struct AgentConsole: View {
                         Image(systemName: "chevron.down")
                     }.buttonStyle(DeskButtonStyle(compact: true)).help("Scroll conversation down")
                 }
+                if let reloadSession {
+                    Button {
+                        dictation.cancel()
+                        reloading = true
+                        reloadSession()
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(6))
+                            reloading = false
+                        }
+                    } label: {
+                        Label(reloading ? "Reconnecting…" : "Reload session", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                    .disabled(reloading)
+                    .help("Close the current connection and resume the agent conversation")
+                }
                 if session.ended {
                     Button("New session", action: newSession).buttonStyle(DeskButtonStyle(prominent: true))
                 } else {
@@ -1420,7 +1476,7 @@ struct AgentConsole: View {
         }
         .background(DeskStyle.background)
         .onDisappear { dictation.cancel() }
-        .onChange(of: ObjectIdentifier(session)) { _, _ in dictation.cancel() }
+        .onChange(of: ObjectIdentifier(session)) { _, _ in dictation.cancel(); reloading = false }
         .onChange(of: session.ended) { _, ended in if ended { dictation.cancel() } }
     }
 }

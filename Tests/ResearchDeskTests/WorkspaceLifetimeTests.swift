@@ -2,6 +2,43 @@ import XCTest
 @testable import ResearchDesk
 
 final class WorkspaceLifetimeTests: XCTestCase {
+    @MainActor
+    func testReconnectClosesRunningTransport() async {
+        let project = Project(name: "Reconnect", path: "/tmp")
+        let session = AgentSession(project: project, agent: "test", executable: "/bin/cat")
+        session.start()
+        XCTAssertFalse(session.ended)
+        let replacement = await session.reconnect()
+        XCTAssertTrue(session.ended)
+        XCTAssertNotNil(replacement)
+        XCTAssertFalse(replacement?.started ?? true)
+        XCTAssertEqual(replacement?.project.id, project.id)
+    }
+
+    func testReloadRetainsConversationAndRemoteWorkspace() async {
+        await MainActor.run {
+            let project = Project(name: "Remote", path: "/tmp")
+            let session = AgentSession(project: project, agent: "claude", executable: nil,
+                                       resumeWorkspace: "/tmp/original")
+            XCTAssertNil(session.reloadedSession())
+            session.ended = true
+            let replacement = session.reloadedSession()!
+            XCTAssertEqual(replacement.resumeID, session.claudeSessionID)
+            XCTAssertEqual(replacement.resumeWorkspace, "/tmp/original")
+            XCTAssertEqual(replacement.project.id, project.id)
+            XCTAssertFalse(replacement.started)
+            XCTAssertFalse(replacement.ended)
+            let codex = AgentSession(project: project, agent: "codex", executable: nil)
+            codex.ended = true
+            XCTAssertTrue(codex.reloadedSession()!.resumeLatest)
+            let id = UUID().uuidString
+            let resumed = AgentSession(project: project, agent: "codex", executable: nil, resumeID: id)
+            resumed.ended = true
+            XCTAssertEqual(resumed.reloadedSession()?.resumeID, id)
+            XCTAssertFalse(resumed.reloadedSession()!.resumeLatest)
+        }
+    }
+
     func testFileBrowserStateSurvivesProjectSwitch() async {
         await MainActor.run {
             let model = DeskModel(loadWorkspace: false)

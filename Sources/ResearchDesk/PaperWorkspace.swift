@@ -69,7 +69,13 @@ struct PaperWorkspace: View {
                 AgentConsole(session: session, stopSession: {
                     session.stop()
                     model.paperAgent = nil
-                }, newSession: { model.paperAgent = nil }, viewArtifact: { tab = 3 })
+                }, newSession: { model.paperAgent = nil }, viewArtifact: { tab = 3 }, reloadSession: {
+                    Task { @MainActor in
+                        if let replacement = await session.reconnect(), model.paperAgent === session {
+                            model.paperAgent = replacement
+                        }
+                    }
+                })
             } else {
                 VStack(spacing: 12) {
                     DeskSpatialMark()
