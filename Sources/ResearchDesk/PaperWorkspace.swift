@@ -39,7 +39,7 @@ struct PaperWorkspace: View {
                 switch tab {
                 case 0: FilesPane(browser: model.fileBrowser(for: model.paperProject)).id(model.paperRepository)
                 case 2: PapersPane(project: model.paperProject, model: model, library: model.papers, showAgent: { tab = 1 }, showTerminal: { tab = 5 })
-                case 3: ArtifactsPane(session: model.paperAgent).id(model.paperAgent.map(ObjectIdentifier.init))
+                case 3: ArtifactsPane(session: model.paperAgent, project: model.paperProject).id(model.paperAgent.map(ObjectIdentifier.init))
                 case 4: NotesPane(project: model.paperProject, model: model, showAgent: { tab = 1 }, showTerminal: { tab = 5 })
                 case 5:
                     if let session = model.terminals[model.paperProject.id] {

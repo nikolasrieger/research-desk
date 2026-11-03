@@ -1160,7 +1160,7 @@ struct ProjectDetail: View {
                 case 1: agent
                 case 2: machineTerminal
                 case 4: PapersPane(project: project, model: model, library: model.papers, showAgent: { model.projectTabs[project.id] = 1 }, showTerminal: { model.projectTabs[project.id] = 2 })
-                case 5: ArtifactsPane(session: model.sessions[project.id]).id(model.sessions[project.id].map(ObjectIdentifier.init))
+                case 5: ArtifactsPane(session: model.sessions[project.id], project: project).id(model.sessions[project.id].map(ObjectIdentifier.init))
                 default: notesPane
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum ArtifactLink {
     static func parse(_ input: String) -> URL? {
@@ -122,6 +123,9 @@ print(json.dumps({'found':bool(files), 'url':latest}))
 
 struct ArtifactsPane: View {
     let session: AgentSession?
+    let project: Project
+    @State private var htmlFile: ArtifactHTMLFile?
+    @State private var htmlSource = ""
     @State private var input = ""
     @State private var url: URL?
     @State private var error = ""
@@ -132,27 +136,28 @@ struct ArtifactsPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Claude artifact URL", text: $input).textFieldStyle(DeskFieldStyle()).onSubmit { open() }
+                TextField("Artifact URL or project HTML path", text: $input).textFieldStyle(DeskFieldStyle()).onSubmit { open() }
                 Button("Open") { open() }.disabled(input.isEmpty)
+                Button("Choose HTML…") { chooseHTML() }
                 Button("Latest in chat") { discover() }.disabled(session?.agent != "claude" || loading)
                 if loading { ProgressView().controlSize(.small) }
             }.padding(12).background { DeskMetalSurface() }
             if let url {
                 HStack {
-                    Text("Sign in to Claude here if the artifact is private.").font(.caption).foregroundStyle(DeskStyle.muted)
+                    Text(url.isFileURL ? (htmlFile == nil ? "HTML preview" : "Remote HTML preview") : "Sign in to Claude here if the artifact is private.").font(.caption).foregroundStyle(DeskStyle.muted)
                     Spacer()
-                    Button("Reload") { reload += 1 }
+                    Button("Reload") { if htmlFile != nil { openHTML(htmlSource) } else { reload += 1 } }
                     Button("Open in browser ↗") { NSWorkspace.shared.open(url) }
                 }.padding(.horizontal, 12).padding(.vertical, 5)
             }
             if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(10) }
             if !webError.isEmpty { Text(webError + " — try Open in browser.").font(.caption).foregroundStyle(.orange).padding(10) }
             if let url {
-                HostedArtifactWebView(url: url, reload: reload, error: $webError)
+                HostedArtifactWebView(url: url, reload: reload, error: $webError, readAccessRoot: htmlFile?.root ?? (url.isFileURL && FileBrowserIO.containsPath(url.path, in: project.path) ? URL(fileURLWithPath: project.path) : nil))
             } else {
                 VStack(spacing: 8) {
-                    Text("Claude artifacts").font(.system(size: 15, weight: .medium))
-                    Text("Open the latest hosted artifact linked in this Claude session, or paste its URL above.")
+                    Text("Artifacts").font(.system(size: 15, weight: .medium))
+                    Text("Open an HTML file from your Mac, enter a project HTML path, or paste a Claude artifact URL.")
                         .font(.callout).foregroundStyle(DeskStyle.muted).multilineTextAlignment(.center)
                     Text("In Claude Code, /artifacts lists your artifacts and lets you copy a link.")
                         .font(.caption).foregroundStyle(DeskStyle.muted)
@@ -162,10 +167,51 @@ struct ArtifactsPane: View {
             .task { if let existing = session?.artifactURL { input = existing.absoluteString; url = existing } else if session?.agent == "claude" { discover() } }
             .onDisappear { request = UUID(); loading = false }
     }
+    private func chooseHTML() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.html]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let selected = panel.url else { return }
+        request = UUID(); loading = false; htmlFile = nil
+        input = selected.absoluteString; url = selected; error = ""; webError = ""
+    }
+    private func openHTML(_ value: String) {
+        let path: String
+        if let file = URL(string: value), file.isFileURL { path = file.path }
+        else if value.hasPrefix("/") { path = value }
+        else { path = URL(fileURLWithPath: project.path).appendingPathComponent(value).standardizedFileURL.path }
+        guard ["html", "htm"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()) else {
+            error = "Choose an .html or .htm file."; return
+        }
+        request = UUID(); let token = request
+        loading = true; error = ""; webError = ""
+        let project = project
+        Task {
+            let result = await Task.detached { () -> Result<ArtifactHTMLFile?, Error> in
+                Result {
+                    if !project.isRemote || value.hasPrefix("file:") {
+                        guard FileManager.default.isReadableFile(atPath: path) else { throw ResearchError.message("HTML file could not be read.") }
+                        return nil
+                    }
+                    return try ArtifactHTML.snapshot(project: project, path: path)
+                }
+            }.value
+            guard request == token else { return }
+            loading = false
+            switch result {
+            case .success(let file):
+                htmlSource = value; htmlFile = file; url = file?.url ?? URL(fileURLWithPath: path); reload += 1
+            case .failure(let failure): error = failure.localizedDescription
+            }
+        }
+    }
     private func open() {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.lowercased().hasPrefix("https:") { openHTML(value); return }
         guard let parsed = ArtifactLink.parse(input) else { error = "Use a hosted artifact URL on claude.ai or claude.site."; return }
         request = UUID(); loading = false
-        url = parsed; session?.artifactURL = parsed; error = ""; webError = ""
+        htmlFile = nil; url = parsed; session?.artifactURL = parsed; error = ""; webError = ""
     }
     private func discover() {
         guard let session, session.agent == "claude" else { return }
@@ -181,7 +227,7 @@ struct ArtifactsPane: View {
             loading = false
             switch result {
             case .success(let found):
-                if let found { url = found; input = found.absoluteString; session.artifactURL = found; webError = "" }
+                if let found { htmlFile = nil; url = found; input = found.absoluteString; session.artifactURL = found; webError = "" }
                 else { error = "No hosted artifact link found in the most recent 8 MB of this chat. Use /artifacts in Claude to copy its link, then paste it above." }
             case .failure(let failure): error = failure.localizedDescription
             }

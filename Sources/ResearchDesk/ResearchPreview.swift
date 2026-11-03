@@ -110,10 +110,12 @@ struct HostedArtifactWebView: NSViewRepresentable {
     let url: URL
     let reload: Int
     @Binding var error: String
+    var readAccessRoot: URL? = nil
     func makeCoordinator() -> Coordinator { Coordinator(error: $error) }
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
@@ -123,12 +125,16 @@ struct HostedArtifactWebView: NSViewRepresentable {
     func updateNSView(_ view: WKWebView, context: Context) {
         if context.coordinator.loadedURL != url || context.coordinator.reload != reload {
             context.coordinator.loadedURL = url; context.coordinator.reload = reload
-            view.load(URLRequest(url: url))
+            context.coordinator.readAccessRoot = readAccessRoot ?? url.deletingLastPathComponent()
+            if url.isFileURL {
+                view.loadFileURL(url, allowingReadAccessTo: readAccessRoot ?? url.deletingLastPathComponent())
+            } else { view.load(URLRequest(url: url)) }
         }
     }
     static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) { view.stopLoading() }
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var loadedURL: URL?
+        var readAccessRoot: URL?
         var reload = -1
         var error: Binding<String>
         init(error: Binding<String>) { self.error = error }
@@ -140,7 +146,11 @@ struct HostedArtifactWebView: NSViewRepresentable {
             error.wrappedValue = failure.localizedDescription
         }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-            guard let url = action.request.url, ["https", "about"].contains(url.scheme ?? "") else { decisionHandler(.cancel); return }
+            guard let url = action.request.url else { decisionHandler(.cancel); return }
+            let webNavigation = ["https", "about"].contains(url.scheme ?? "")
+            let localNavigation = loadedURL?.isFileURL == true && url.isFileURL &&
+                FileBrowserIO.containsPath(url.standardizedFileURL.path, in: (readAccessRoot ?? loadedURL!.deletingLastPathComponent()).path)
+            guard webNavigation || localNavigation else { decisionHandler(.cancel); return }
             // Authentication redirects remain in the web view; no credentials are read by the app.
             decisionHandler(.allow)
         }
