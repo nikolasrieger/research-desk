@@ -284,6 +284,7 @@ enum AgentLocator {
     let agent: String
     let resumeID: String?
     var resumeLatest = false
+    var initialPrompt: String?
     let claudeSessionID: String
     var artifactURL: URL?
     let resumeWorkspace: String?
@@ -322,7 +323,8 @@ enum AgentLocator {
             .compactMap { $0 }.joined(separator: ":")
         environment.append("PATH=" + paths)
         environment.append("SHELL=/bin/zsh")
-        let agentArguments = resumeLatest && agent == "codex" ? ["resume", "--last"] : resumeID.map { agent == "codex" ? ["resume", $0] : ["--resume", $0] } ?? (agent == "claude" ? ["--session-id", claudeSessionID] : [])
+        var agentArguments = resumeLatest && agent == "codex" ? ["resume", "--last"] : resumeID.map { agent == "codex" ? ["resume", $0] : ["--resume", $0] } ?? (agent == "claude" ? ["--session-id", claudeSessionID] : [])
+        if let initialPrompt { agentArguments.append(initialPrompt) }
         let workingDirectory = resumeWorkspace.flatMap { $0.hasPrefix("/") ? $0 : nil } ?? project.path
         if agent == "terminal" {
             if project.isRemote {
@@ -466,7 +468,7 @@ struct RemoteListing: Decodable, Sendable {
 
 enum Command {
     private static let sshControlDirectory: String? = {
-        let path = "/private/tmp/research-desk-\(getuid())"
+        let path = "/private/tmp/rd-\(getuid())-\(getpid())"
         do {
             try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let attributes = try FileManager.default.attributesOfItem(atPath: path)
@@ -510,10 +512,12 @@ enum Command {
 
     static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    private static let sshLock = NSLock()
     static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000) -> (String, String, Int32) {
         guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             return ("", "Invalid SSH host", -1)
         }
+        sshLock.lock(); defer { sshLock.unlock() }
         var arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
         if let sshControlDirectory {
             arguments += ["-o", "ControlMaster=auto", "-o", "ControlPersist=2m", "-o", "ControlPath=\(sshControlDirectory)/%C"]
@@ -918,6 +922,7 @@ enum Command {
 
 @main struct ResearchDeskApp: App {
     @StateObject private var model = DeskModel()
+    @State private var showUsage = false
     @AppStorage("sidebarHidden", store: UserDefaults(suiteName: WorkspaceStorage.domain)) private var sidebarHidden = false
     var body: some Scene {
         WindowGroup("Research Desk") {
@@ -983,6 +988,9 @@ enum Command {
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
+                                    Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
+                                    Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
+                                    Divider()
                                     Button("Rename…") { model.prepareRename(project) }
                                     Button("Remove from desk", role: .destructive) { model.remove(project) }
                                 }
@@ -996,6 +1004,9 @@ enum Command {
                             .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
                             .padding(.horizontal, 10).padding(.bottom, 8)
                     }
+                    Button { showUsage = true } label: { Label("Settings · Claude usage", systemImage: "gearshape") }
+                        .buttonStyle(DeskButtonStyle()).padding(.top, 12)
+                        .sheet(isPresented: $showUsage) { ClaudeUsagePane() }
                     HStack(spacing: 8) {
                         Button { model.addLocal() } label: { Label("Local folder", systemImage: "plus") }
                         Button { model.prepareRemote() } label: { Label("SSH", systemImage: "network") }

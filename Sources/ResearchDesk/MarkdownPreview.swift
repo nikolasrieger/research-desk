@@ -10,6 +10,7 @@ private struct MarkdownBlock: Identifiable {
 struct MarkdownPreview: View {
     let source: String
     var rendersTables = false
+    var linksFilePaths = false
 
     private var blocks: [MarkdownBlock] {
         let lines = source.components(separatedBy: .newlines)
@@ -142,7 +143,7 @@ struct MarkdownPreview: View {
     }
 
     private func inline(_ source: String) -> Text {
-        if let value = try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+        if let value = try? AttributedString(markdown: linksFilePaths ? AgentFileLink.linkCodePaths(source) : source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
             return Text(value)
         }
         return Text(source)

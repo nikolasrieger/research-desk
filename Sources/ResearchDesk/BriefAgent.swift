@@ -150,8 +150,9 @@ struct BriefAttachment: Identifiable {
     @Published private var conversations: [UUID: [BriefAgentModel]] = [:]
     private var observer: NSObjectProtocol?
     private var lastOpened: [String: UUID] = [:]
-    private let defaults = UserDefaults(suiteName: WorkspaceStorage.domain) ?? .standard
-    private init() {
+    private let defaults: UserDefaults
+    init(defaults: UserDefaults = UserDefaults(suiteName: WorkspaceStorage.domain) ?? .standard) {
+        self.defaults = defaults
         observer = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { BriefAgentStore.shared.conversations.values.flatMap { $0 }.forEach { $0.stop() } }
         }
@@ -159,7 +160,7 @@ struct BriefAttachment: Identifiable {
     func session(for project: Project) -> BriefAgentModel {
         if let existing = sessions[project.id], existing.project == project { return existing }
         let model = BriefAgentModel(project: project)
-        track(model)
+        track(model, project: project)
         sessions[project.id] = model
         conversations[project.id, default: []].append(model)
         return model
@@ -168,16 +169,35 @@ struct BriefAttachment: Identifiable {
     func activity(for project: Project) -> Activity {
         let chats = chats(for: project)
         if chats.contains(where: { $0.running }) { return .running }
-        if chats.contains(where: { $0.hasUnreadReply }) { return .unread }
+        if defaults.bool(forKey: unreadKey(project)) || chats.contains(where: { $0.hasUnreadReply }) { return .unread }
         return .idle
     }
-    private func track(_ model: BriefAgentModel) {
-        model.onActivityChange = { [weak self] in self?.objectWillChange.send() }
+    private func unreadKey(_ project: Project) -> String { "agent.projectUnread." + project.host + ":" + project.path }
+    func mark(_ project: Project, unread: Bool) {
+        for chat in chats(for: project) { chat.hasUnreadReply = unread }
+        defaults.set(unread, forKey: unreadKey(project))
+        objectWillChange.send()
+    }
+    private func track(_ model: BriefAgentModel, project: Project) {
+        var wasUnread = model.hasUnreadReply
+        model.onActivityChange = { [weak self, weak model] in
+            guard let self, let model else { return }
+            if model.hasUnreadReply { self.defaults.set(true, forKey: self.unreadKey(project)) }
+            else if wasUnread { self.defaults.set(self.chats(for: project).contains { $0.hasUnreadReply }, forKey: self.unreadKey(project)) }
+            wasUnread = model.hasUnreadReply
+            self.objectWillChange.send()
+        }
+        // Reading a restored chat also clears its persisted project marker.
+        model.onRead = { [weak self] in
+            guard let self else { return }
+            self.defaults.set(self.chats(for: project).contains { $0.hasUnreadReply }, forKey: self.unreadKey(project))
+            self.objectWillChange.send()
+        }
     }
     func chats(for project: Project) -> [BriefAgentModel] { conversations[project.id] ?? [] }
     func create(for project: Project) -> BriefAgentModel {
         let model = BriefAgentModel(project: project)
-        track(model)
+        track(model, project: project)
         conversations[project.id, default: []].append(model)
         return model
     }
@@ -215,7 +235,7 @@ struct BriefAttachment: Identifiable {
             workingProject.name = URL(fileURLWithPath: path).lastPathComponent
         }
         let model = BriefAgentModel(project: workingProject)
-        track(model)
+        track(model, project: project)
         conversations[project.id, default: []].append(model)
         model.useSession(saved)
         return model
@@ -247,6 +267,7 @@ struct BriefAttachment: Identifiable {
     @Published var hasUnreadReply = false { didSet { onActivityChange?() } }
     @Published var running = false { didSet { onActivityChange?() } }
     @Published var loadingChanges = false
+    @Published var changesError = ""
     @Published var loadingHistory = false
     @Published var error = ""
     @Published var status = "Ready for an instruction"
@@ -352,7 +373,7 @@ struct BriefAttachment: Identifiable {
                         running = false; permissions.removeAll(); transport = nil
                         if changingModel { error = "Connection ended while changing the model." }
                         changingModel = false; pendingModelChange = nil
-                        status = interrupted ? "Connection ended before completion" : "Disconnected · reconnects on the next instruction"
+                        status = interrupted ? (error.isEmpty ? "Connection ended before completion" : error) : "Disconnected · reconnects on the next instruction"
                         refreshChanges()
                     }
                 }
@@ -464,13 +485,33 @@ struct BriefAttachment: Identifiable {
             }
         case "control_cancel_request":
             if let id = event["request_id"] as? String { permissions.removeAll { $0.id == id } }
+        case "error":
+            let detail = event["error"] as? [String: Any]
+            error = detail?["message"] as? String ?? event["message"] as? String ?? event["error"] as? String ?? "Claude reported an error."
+            status = error; resultFailed = true; interrupted = true
         case "system":
+            if let detail = event["error"] as? [String: Any], let message = detail["message"] as? String {
+                error = message; status = message; resultFailed = true; interrupted = true
+            }
             if event["subtype"] as? String == "init" {
                 if let id = event["session_id"] as? String { sessionID = id }
                 if let model = event["model"] as? String { activeModel = model }
                 resume = true; status = "Claude is working…"; log("Connected to Claude Code")
             } else if let subtype = event["subtype"] as? String { log(subtype.replacingOccurrences(of: "_", with: " ")) }
+        case "rate_limit_event":
+            if let info = event["rate_limit_info"] as? [String: Any], info["status"] as? String == "rejected" {
+                var message = "Claude usage limit reached"
+                if let reset = info["resetsAt"] as? Double ?? info["resets_at"] as? Double {
+                    message += " · resets " + Date(timeIntervalSince1970: reset).formatted(date: .abbreviated, time: .shortened)
+                }
+                error = message; status = message; resultFailed = true; interrupted = true
+            }
         case "assistant":
+            if event["error"] != nil {
+                let message = event["message"] as? [String: Any]
+                let text = (message?["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                if !text.isEmpty { error = text; status = text; resultFailed = true; interrupted = true }
+            }
             finalResponse.observe(event)
             let message = event["message"] as? [String: Any]
             if event["parent_tool_use_id"] as? String == nil, let model = message?["model"] as? String { activeModel = model }
@@ -504,7 +545,7 @@ struct BriefAttachment: Identifiable {
             if resultFailed {
                 let details = (event["errors"] as? [String])?.joined(separator: "\n") ?? ""
                 let result = (event["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                error = !details.isEmpty ? details : !result.isEmpty ? result : "Claude ended this turn with an error."
+                error = !details.isEmpty ? details : !result.isEmpty ? result : !error.isEmpty ? error : "Claude ended this turn with an error."
                 interrupted = true
             } else {
                 interrupted = false
@@ -521,7 +562,7 @@ struct BriefAttachment: Identifiable {
             }
             running = false
             permissions.removeAll()
-            status = interrupted ? "Request ended before completion" : "Ready for your next instruction"
+            status = interrupted ? (error.isEmpty ? "Request ended before completion" : error) : "Ready for your next instruction"
             refreshChanges()
         default: break
         }
@@ -529,8 +570,9 @@ struct BriefAttachment: Identifiable {
     var pastActions: [String] {
         progress.last == status ? Array(progress.dropLast()) : progress
     }
+    var onRead: (() -> Void)?
     func markLatestRead() {
-        if !replies.isEmpty, index == replies.count - 1 { hasUnreadReply = false }
+        if !replies.isEmpty, index == replies.count - 1 { hasUnreadReply = false; onRead?() }
     }
     func dismissError() { error = "" }
     func log(_ message: String) {
@@ -552,14 +594,14 @@ struct BriefAttachment: Identifiable {
 
     func refreshChanges() {
         guard !loadingChanges else { return }
-        loadingChanges = true
+        loadingChanges = true; changesError = ""
         let project = project
         Task {
             let result = await Task.detached { BriefChanges.read(project) }.value
             loadingChanges = false
             switch result {
             case .success(let files): changes = files
-            case .failure(let failure): error = failure.localizedDescription
+            case .failure(let failure): changesError = failure.localizedDescription
             }
         }
     }
@@ -575,13 +617,19 @@ enum BriefChanges {
         catch { return .failure(ResearchError.message("Could not decode Git changes: \(error.localizedDescription)")) }
     }
     static let script = #"""
-import os, subprocess, json
+import os, subprocess, json, sys
 
 def git(*args):
     return subprocess.run(['git', '--no-pager', *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+repo = git('rev-parse', '--is-inside-work-tree')
+if repo.returncode:
+    message = repo.stderr.decode('utf-8', 'replace')
+    if 'not a git repository' in message:
+        print('[]'); sys.exit(0)
+    sys.exit(message.strip())
 r = git('status', '--porcelain=v1', '-z', '--untracked-files=all')
 if r.returncode:
-    raise RuntimeError(r.stderr.decode('utf-8', 'replace'))
+    sys.exit(r.stderr.decode('utf-8', 'replace').strip())
 root = os.path.realpath('.')
 entries = r.stdout.split(b'\0')
 result = []
@@ -922,6 +970,7 @@ struct BriefAgentView: View {
     @StateObject private var dictation = ConsoleDictation()
     @FocusState private var instructionFocused: Bool
     @State private var inspector = 0
+    @State private var previewPath: String?
     @State private var fileID: String?
     @State private var selected: Set<Int> = []
     @State private var anchor: Int?
@@ -952,7 +1001,8 @@ struct BriefAgentView: View {
                     responseNavigation
                     if let reply = session.current {
                         BriefInstructionPreview(source: reply.instruction).id(reply.id)
-                        MarkdownPreview(source: reply.markdown, rendersTables: true).id(reply.id)
+                        MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).id(reply.id)
+                            .environment(\.openURL, OpenURLAction { openFileLink($0) })
                     } else {
                         VStack(alignment: .leading, spacing: 14) {
                             Text(session.interrupted ? "This conversation was interrupted." : "Give Claude a direction.").font(.system(size: 24, weight: .light))
@@ -981,6 +1031,11 @@ struct BriefAgentView: View {
         .onChange(of: session.permissions.count) { _, count in if count > 0 { inspector = 0 } }
     }
 
+    private func openFileLink(_ url: URL) -> OpenURLAction.Result {
+        guard let path = AgentFileLink.path(url, project: session.project) else { return .systemAction }
+        previewPath = path; inspector = 2
+        return .handled
+    }
     private func markViewedResponse() {
         if responseVisible && NSApp.isActive { session.markLatestRead() }
     }
@@ -1100,9 +1155,15 @@ struct BriefAgentView: View {
             HStack(spacing: 6) {
                 Button("Progress") { inspector = 0 }.buttonStyle(DeskButtonStyle(prominent: inspector == 0))
                 Button("Changes (\(session.changes.count))") { inspector = 1 }.buttonStyle(DeskButtonStyle(prominent: inspector == 1))
+                if previewPath != nil {
+                    Button("File") { inspector = 2 }.buttonStyle(DeskButtonStyle(prominent: inspector == 2))
+                    Button { previewPath = nil; if inspector == 2 { inspector = 0 } } label: { Image(systemName: "xmark") }.buttonStyle(DeskButtonStyle(compact: true))
+                }
                 Spacer(minLength: 0)
             }
-            if inspector == 0 {
+            if inspector == 2, let previewPath {
+                AgentFilePreview(project: session.project, path: previewPath, openLink: { openFileLink($0) }).id(previewPath)
+            } else if inspector == 0 {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(alignment: .top) {
@@ -1132,6 +1193,7 @@ struct BriefAgentView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
+                if !session.changesError.isEmpty { Text(session.changesError).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
                 HStack {
                     Text("Working tree + staged").font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
                     Spacer()
