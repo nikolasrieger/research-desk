@@ -150,8 +150,8 @@ struct ArtifactsPane: View {
                     Button("Open in browser ↗") { NSWorkspace.shared.open(url) }
                 }.padding(.horizontal, 12).padding(.vertical, 5)
             }
-            if !error.isEmpty { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(10) }
-            if !webError.isEmpty { Text(webError + " — try Open in browser.").font(.caption).foregroundStyle(.orange).padding(10) }
+            if !error.isEmpty { DeskErrorBanner(message: error, title: "Could not open artifact", onDismiss: { error = "" }).padding(12) }
+            if !webError.isEmpty { DeskErrorBanner(message: webError, title: "Preview could not load", onDismiss: { webError = "" }).padding(12) }
             if let url {
                 HostedArtifactWebView(url: url, reload: reload, error: $webError, readAccessRoot: htmlFile?.root ?? (url.isFileURL && FileBrowserIO.containsPath(url.path, in: project.path) ? URL(fileURLWithPath: project.path) : nil))
             } else {

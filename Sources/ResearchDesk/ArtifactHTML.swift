@@ -10,10 +10,6 @@ final class ArtifactHTMLFile: Sendable {
 
 enum ArtifactHTML {
     static func snapshot(project: Project, path: String) throws -> ArtifactHTMLFile {
-        let command = "python3 -c " + Command.shellQuote(assetScript) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path)
-        let (output, failure, code) = Command.ssh(project.host, command, maxOutput: 2_000_000)
-        guard code == 0 else { throw ResearchError.message(failure.isEmpty ? "Could not resolve HTML assets." : failure) }
-        let paths = try JSONDecoder().decode([String].self, from: Data(output.utf8))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("artifact-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let page = URL(fileURLWithPath: path).standardizedFileURL.path
@@ -21,15 +17,47 @@ enum ArtifactHTML {
         guard FileBrowserIO.containsPath(page, in: base) else { throw ResearchError.message("HTML file is outside this project.") }
         let relativePage = String(page.dropFirst(base.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let snapshot = ArtifactHTMLFile(root: root, url: root.appendingPathComponent(relativePage))
-        for relative in paths {
-            let target = root.appendingPathComponent(relative).standardizedFileURL
-            guard FileBrowserIO.containsPath(target.path, in: root.path), !relative.hasPrefix("/") else {
-                throw ResearchError.message("Invalid HTML asset path.")
-            }
-            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try FileBrowserIO.copyFile(project, path: URL(fileURLWithPath: base).appendingPathComponent(relative).path, to: target, limit: 500_000_000)
-        }
+        let archive = root.appendingPathComponent(".assets-" + UUID().uuidString + ".tar")
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let command = "python3 -c " + Command.shellQuote(assetScript) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " archive"
+        try transfer(host: project.host, command: command, destination: archive)
+        let (_, failure, code) = Command.run("/usr/bin/tar", ["-xf", archive.path, "-C", root.path], timeout: 60, maxOutput: 2000)
+        guard code == 0 else { throw ResearchError.message(failure.isEmpty ? "Could not unpack HTML assets." : failure) }
         return snapshot
+    }
+
+    /// One SSH connection streams all assets to disk, avoiding per-file connection latency.
+    private static func transfer(host: String, command: String, destination: URL) throws {
+        guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
+            throw ResearchError.message("Invalid SSH host.")
+        }
+        let errorsURL = destination.appendingPathExtension("stderr")
+        FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        FileManager.default.createFile(atPath: errorsURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let output = try FileHandle(forWritingTo: destination)
+        let errors = try FileHandle(forWritingTo: errorsURL)
+        defer { try? output.close(); try? errors.close(); try? FileManager.default.removeItem(at: errorsURL) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", host, command]
+        process.standardOutput = output; process.standardError = errors
+        try process.run()
+        let deadline = Date().addingTimeInterval(300)
+        while process.isRunning && Date() < deadline {
+            if let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size]) as? NSNumber, size.intValue > 505_000_000 {
+                process.terminate(); process.waitUntilExit()
+                throw ResearchError.message("HTML assets exceed the 500 MB preview limit.")
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate(); process.waitUntilExit()
+            throw ResearchError.message("HTML transfer timed out. Try again.")
+        }
+        guard process.terminationStatus == 0 else {
+            let message = (try? String(contentsOf: errorsURL, encoding: .utf8)) ?? "Could not download HTML assets."
+            throw ResearchError.message(String(message.suffix(4000)))
+        }
     }
 
     static let assetScript = #"""
@@ -73,6 +101,26 @@ while pending:
         value = unquote(parsed.path)
         target = os.path.normpath(os.path.join(os.path.dirname(path), value))
         pending.append(target)
-print(json.dumps(sorted(os.path.relpath(path, root) for path in seen)))
+paths = sorted(os.path.relpath(path, root) for path in seen)
+if len(sys.argv) > 3 and sys.argv[3] == 'archive':
+    import tarfile, stat
+    transferred = 0
+    with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
+        for relative in paths:
+            if os.path.isabs(relative) or '..' in relative.split(os.sep): raise ValueError('Invalid asset path')
+            source = os.path.join(root, relative)
+            if os.path.commonpath([os.path.realpath(root), os.path.realpath(source)]) != os.path.realpath(root): raise ValueError('Asset outside project')
+            with open(source, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode): raise ValueError('Asset is not a regular file')
+                transferred += info.st_size
+                if transferred > 500000000: raise ValueError('HTML assets exceed the 500 MB preview limit')
+                # Only regular relative entries: no symlinks, hard links or directory traversal.
+                entry = tarfile.TarInfo(relative)
+                entry.size = info.st_size
+                entry.mode = 0o600
+                archive.addfile(entry, stream)
+else:
+    print(json.dumps(paths))
 """#
 }

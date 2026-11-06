@@ -411,7 +411,7 @@ struct FilesPane: View {
                     }
                 }
                 if browser.loading { ProgressView().controlSize(.small) }
-                if !browser.error.isEmpty { Text(browser.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+                if !browser.error.isEmpty { DeskErrorBanner(message: browser.error, title: "Could not load files", onDismiss: { browser.error = "" }) }
             }.padding(12).frame(minWidth: 150, idealWidth: 234, maxWidth: .infinity, maxHeight: .infinity)
                 .background(DeskStyle.surface)
             previewPane.frame(minWidth: 220, idealWidth: 700, maxWidth: .infinity, maxHeight: .infinity)

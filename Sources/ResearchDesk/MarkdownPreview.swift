@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 private struct MarkdownBlock: Identifiable {
     enum Kind { case heading(Int), paragraph, bullet, quote, code, rule, table([[String]]) }
@@ -116,19 +117,25 @@ struct MarkdownPreview: View {
                                 .background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
                         }
                     case .table(let rows):
+                        let widths = MarkdownTableLayout.columnWidths(rows)
                         ScrollView(.horizontal) {
                             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                                 ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                                     GridRow {
-                                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                                            inline(cell).font(.system(size: 12, weight: rowIndex == 0 ? .semibold : .regular))
-                                                .frame(minWidth: 80, maxWidth: 280, alignment: .leading).padding(10)
+                                        ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
+                                            inline(MarkdownTableLayout.cellText(cell))
+                                                .font(.system(size: 12, weight: rowIndex == 0 ? .semibold : .regular))
+                                                .lineLimit(nil)
+                                                .frame(width: widths[column], alignment: .topLeading)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .padding(10)
+                                                .frame(maxHeight: .infinity, alignment: .topLeading)
                                                 .background(rowIndex == 0 ? DeskStyle.raised : DeskStyle.surface)
                                                 .overlay(Rectangle().stroke(DeskStyle.edge, lineWidth: 0.5))
                                         }
                                     }
                                 }
-                            }.fixedSize(horizontal: true, vertical: false)
+                            }
                         }
                     case .rule:
                         Rectangle().fill(DeskStyle.edge).frame(height: 1).padding(.vertical, 4)
@@ -190,5 +197,21 @@ enum MarkdownTableParser {
     static func isTerminalRow(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         return !trimmed.isEmpty && ["│", "┃", "║", "┌", "┐", "└", "┘", "├", "┤", "┼", "╭", "╰", "╔", "╚", "╠", "┏", "┗", "┣", "┍", "+", "|"].contains(where: { trimmed.hasPrefix($0) })
+    }
+}
+
+/// A finite width proposal makes Text wrap even inside the horizontal table scroller.
+enum MarkdownTableLayout {
+    static func cellText(_ source: String) -> String {
+        source.replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\n", options: .regularExpression)
+    }
+    static func columnWidths(_ rows: [[String]]) -> [CGFloat] {
+        let count = rows.map(\.count).max() ?? 0
+        return (0..<count).map { column in
+            let widest = rows.filter { $0.indices.contains(column) }.flatMap {
+                cellText($0[column]).components(separatedBy: .newlines)
+            }.map { ($0 as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width }.max() ?? 0
+            return min(260, max(90, ceil(widest)))
+        }
     }
 }

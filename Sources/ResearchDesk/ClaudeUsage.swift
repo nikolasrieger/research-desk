@@ -129,7 +129,7 @@ struct ClaudeUsagePane: View {
                 Text("Updated \(reading.date.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption).foregroundStyle(DeskStyle.muted)
             }
-            if !model.error.isEmpty { Text(model.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+            if !model.error.isEmpty { DeskErrorBanner(message: model.error, title: "Could not refresh usage", onDismiss: { model.error = "" }) }
             Text("Uses the Claude Code account on this Mac. Remote sessions may use a different account.")
                 .font(.caption).foregroundStyle(DeskStyle.muted)
         }.padding(24).frame(width: 490).background(DeskStyle.background)

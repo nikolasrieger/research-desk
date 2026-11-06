@@ -195,8 +195,8 @@ struct BriefAttachment: Identifiable {
         }
     }
     func chats(for project: Project) -> [BriefAgentModel] { conversations[project.id] ?? [] }
-    func create(for project: Project) -> BriefAgentModel {
-        let model = BriefAgentModel(project: project)
+    func create(for project: Project, workingProject: Project? = nil) -> BriefAgentModel {
+        let model = BriefAgentModel(project: workingProject ?? project)
         track(model, project: project)
         conversations[project.id, default: []].append(model)
         return model
@@ -247,6 +247,7 @@ struct BriefAttachment: Identifiable {
     private let executableOverride: String?
     let id = UUID()
     @Published var title = "New conversation"
+    @Published var contextUsage = ChatContextUsage()
     @Published private(set) var selectedModel = ""
     @Published private(set) var modelOptions = BriefModelOption.defaults
     @Published private(set) var changingModel = false
@@ -308,6 +309,8 @@ struct BriefAttachment: Identifiable {
             loadingHistory = false
             switch result {
             case .success(let records):
+                contextUsage.tokens = records.last?.contextTokens
+                contextUsage.limit = records.last?.contextWindow
                 replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
                 interrupted = records.last?.incomplete == true
                 if interrupted { pendingInstruction = records.last?.instruction ?? "" }
@@ -322,6 +325,7 @@ struct BriefAttachment: Identifiable {
         guard !running, !loadingHistory else { return }
         let previous = transport; transport = nil; previous?.stop()
         sessionID = UUID().uuidString.lowercased(); resume = false
+        contextUsage = ChatContextUsage()
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
         error = ""; status = "Ready for an instruction"
     }
@@ -431,6 +435,8 @@ struct BriefAttachment: Identifiable {
             let result = await Task.detached { BriefHistory.read(project, id: id) }.value
             switch result {
             case .success(let records):
+                contextUsage.tokens = records.last?.contextTokens
+                contextUsage.limit = records.last?.contextWindow
                 replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
                 index = max(0, replies.count - 1)
                 interrupted = records.last?.incomplete == true
@@ -459,6 +465,7 @@ struct BriefAttachment: Identifiable {
 
     func consume(_ data: Data) {
         guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { return }
+        contextUsage.observe(event)
         switch type {
         case "control_response":
             if let response = event["response"] as? [String: Any], let pending = pendingModelChange,
@@ -574,7 +581,10 @@ struct BriefAttachment: Identifiable {
     func markLatestRead() {
         if !replies.isEmpty, index == replies.count - 1 { hasUnreadReply = false; onRead?() }
     }
-    func dismissError() { error = "" }
+    func dismissError() {
+        if !error.isEmpty && status == error { status = "Request interrupted" }
+        error = ""
+    }
     func log(_ message: String) {
         guard progress.last != message else { return }
         progress.append(message)
@@ -717,7 +727,7 @@ print(json.dumps(sorted(found.values(), key=lambda x: x['modified'], reverse=Tru
 }
 
 enum BriefHistory {
-    struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool? }
+    struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int? }
     static func read(_ project: Project, id: String) -> Result<[Record], Error> {
         guard UUID(uuidString: id) != nil else { return .failure(ResearchError.message("Invalid saved session ID.")) }
         let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(id)
@@ -737,6 +747,8 @@ parts = {}
 has_tools = False
 stop_reason = None
 completion = False
+context_tokens = None
+context_window = None
 
 def text_content(content):
     if isinstance(content, str): return content.strip()
@@ -765,10 +777,16 @@ for raw in data.splitlines():
     if not isinstance(event, dict): continue
     if event.get('isSidechain') or event.get('parent_tool_use_id'): continue
     if event.get('isMeta') and event.get('type') != 'system': continue
+    if event.get('type') == 'system' and event.get('subtype') == 'compact_boundary': context_tokens = None
     if event.get('queueTranscriptOnly') or event.get('isCompactSummary'): continue
     message = event.get('message', {})
     if not isinstance(message, dict): message = {}
     content = message.get('content', [])
+    usage = message.get('usage')
+    if event.get('type') == 'assistant' and not event.get('isApiErrorMessage') and isinstance(usage, dict) and 'input_tokens' in usage:
+        context_tokens = sum(max(0, int(usage.get(key) or 0)) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'))
+    windows = [v.get('contextWindow') for v in event.get('modelUsage', {}).values() if isinstance(v, dict) and isinstance(v.get('contextWindow'), (int, float)) and v['contextWindow'] > 0]
+    if windows: context_window = min(windows)
     if event.get('type') == 'user':
         if isinstance(content, list) and any(b.get('type') == 'tool_result' for b in content if isinstance(b, dict)): continue
         text = text_content(content)
@@ -796,6 +814,9 @@ for raw in data.splitlines():
             if result: parts = {0: result}; has_tools = False; stop_reason = 'end_turn'
             completion = True
 flush()
+if records:
+    records[-1]["contextTokens"] = context_tokens
+    records[-1]["contextWindow"] = context_window
 print(json.dumps(records[-40:]))
 """#
 }
@@ -839,8 +860,15 @@ struct BriefAgentPane: View {
                 BriefAgentView(session: selected, model: model, goBack: {
                     self.selected = nil
                     store.discover(project)
+                }, startNewChat: {
+                    let fresh = store.create(for: project, workingProject: selected.project)
+                    fresh.chooseModel(selected.selectedModel)
+                    fresh.instruction = ChatContextUsage.handoff(from: selected.sessionID, project: selected.project, draft: selected.instruction)
+                    fresh.attachments = selected.attachments
+                    store.remember(selected, for: project)
+                    self.selected = fresh
                 }).id(selected.id)
-                    .onDisappear { store.remember(selected, for: project) }
+                    .onDisappear { if self.selected == nil || self.selected?.id == selected.id { store.remember(selected, for: project) } }
             } else {
                 overview
             }
@@ -872,7 +900,7 @@ struct BriefAgentPane: View {
                     .font(.caption).foregroundStyle(DeskStyle.muted)
                 if !store.discoveryError.isEmpty {
                     HStack(alignment: .top) {
-                        Text(store.discoveryError).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                        DeskErrorBanner(message: store.discoveryError, title: "Could not load conversations")
                         Spacer()
                         Button { store.discoveryError = "" } label: { Image(systemName: "xmark") }.buttonStyle(DeskButtonStyle(compact: true))
                     }
@@ -967,6 +995,7 @@ struct BriefAgentView: View {
     @ObservedObject var session: BriefAgentModel
     @ObservedObject var model: DeskModel
     let goBack: () -> Void
+    let startNewChat: () -> Void
     @StateObject private var dictation = ConsoleDictation()
     @FocusState private var instructionFocused: Bool
     @State private var inspector = 0
@@ -993,12 +1022,12 @@ struct BriefAgentView: View {
             }.buttonStyle(DeskButtonStyle()).padding(.horizontal, 16).padding(.vertical, 8)
             Divider()
             if model.sessions[session.project.id]?.ended == false {
-                Text("An existing terminal agent is still running in this workspace. Stop it in the standard app before sending here.")
-                    .font(.caption).foregroundStyle(.orange).padding(10)
+                DeskErrorBanner(message: "A terminal agent is still running in this workspace. Stop it before sending another instruction.", title: "Agent already running").padding(10)
             }
             HSplitView {
                 VStack(spacing: 0) {
                     responseNavigation
+                    contextIndicator
                     if let reply = session.current {
                         BriefInstructionPreview(source: reply.instruction).id(reply.id)
                         MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).id(reply.id)
@@ -1029,6 +1058,23 @@ struct BriefAgentView: View {
             if running { historyExpanded = false; dictation.cancel() }
         }
         .onChange(of: session.permissions.count) { _, count in if count > 0 { inspector = 0 } }
+    }
+
+    private var contextIndicator: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(session.contextUsage.label).font(.caption.monospaced())
+                    .foregroundStyle(session.contextUsage.isLarge ? Color.orange : DeskStyle.muted)
+                Spacer(minLength: 4)
+                Button("Start a new chat", action: startNewChat)
+                    .buttonStyle(DeskButtonStyle(compact: true))
+                    .disabled(session.running || session.loadingHistory || session.reloading || (session.replies.isEmpty && session.contextUsage.tokens == nil))
+            }
+            if session.contextUsage.isLarge {
+                DeskErrorBanner(message: "Start a new chat to continue with a reference to this conversation and a smaller context.", title: "Chat context is getting large")
+            }
+        }.padding(.horizontal, 14).padding(.bottom, 10)
+            .help("Latest context tokens reported by Claude, including cached input and output. This is the active context size, not cumulative billing. Warns at 75% of the reported context window, or 150,000 tokens when the window is unknown.")
     }
 
     private func openFileLink(_ url: URL) -> OpenURLAction.Result {
@@ -1064,11 +1110,7 @@ struct BriefAgentView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !session.error.isEmpty {
-                HStack(alignment: .top, spacing: 10) {
-                    ScrollView { Text(session.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 85)
-                    Button { session.dismissError() } label: { Image(systemName: "xmark") }
-                        .buttonStyle(DeskButtonStyle(compact: true)).help("Dismiss error").accessibilityLabel("Dismiss error")
-                }
+                DeskErrorBanner(message: session.error, title: "Claude needs attention", onDismiss: { session.dismissError() })
             }
             ForEach(session.attachments) { attachment in
                 HStack {
@@ -1167,7 +1209,7 @@ struct BriefAgentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(alignment: .top) {
-                            Text(session.status).font(.system(size: 12, weight: .medium))
+                            Text(!session.error.isEmpty && session.status == session.error ? "Request needs attention" : session.status).font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 2)
                             if session.running { Button("Stop") { session.stop() }.buttonStyle(DeskButtonStyle(compact: true)) }
                         }
@@ -1193,7 +1235,7 @@ struct BriefAgentView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                if !session.changesError.isEmpty { Text(session.changesError).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+                if !session.changesError.isEmpty { DeskErrorBanner(message: session.changesError, title: "Could not load changes", onDismiss: { session.changesError = "" }) }
                 HStack {
                     Text("Working tree + staged").font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
                     Spacer()

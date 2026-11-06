@@ -45,7 +45,7 @@ struct RemotePDFPane: View {
             if let document { PDFDocumentView(document: document) }
             else if !error.isEmpty {
                 VStack(spacing: 12) {
-                    Text(error).font(.callout).multilineTextAlignment(.center)
+                    DeskErrorBanner(message: error, title: "Could not load PDF")
                     HStack {
                         Button("Retry") { attempt += 1 }
                         Button("Open PDF in browser") { NSWorkspace.shared.open(url) }

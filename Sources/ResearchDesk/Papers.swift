@@ -191,7 +191,7 @@ struct PapersPane: View {
                 Button("Add paper") { add() }.disabled(library.busy || input.isEmpty)
                 if library.busy { ProgressView().controlSize(.small) }
             }.padding(.horizontal, 16).padding(.vertical, 12).background(DeskStyle.surface)
-            if !library.error.isEmpty { Text(library.error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(8) }
+            if !library.error.isEmpty { DeskErrorBanner(message: library.error, title: "Paper library needs attention").padding(8) }
             HSplitView {
                 VStack(spacing: 10) {
                     TextField("Search papers", text: $filter).textFieldStyle(DeskFieldStyle())

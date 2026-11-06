@@ -58,11 +58,11 @@ struct AgentFilePreview: View {
                 Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(DeskButtonStyle(compact: true))
             }.padding(.bottom, 10)
             if loading { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
-            else if !error.isEmpty { Text(error).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, maxHeight: .infinity) }
+            else if !error.isEmpty { VStack { DeskErrorBanner(message: error, title: "Could not open file"); Spacer() } }
             else if ["html", "htm"].contains(ext) {
                 HostedArtifactWebView(url: html?.url ?? URL(fileURLWithPath: path), reload: revision, error: $webError,
                     readAccessRoot: html?.root ?? URL(fileURLWithPath: project.path))
-                if !webError.isEmpty { Text(webError).font(.caption).foregroundStyle(.orange) }
+                if !webError.isEmpty { DeskErrorBanner(message: webError, title: "Preview could not load", onDismiss: { webError = "" }) }
             } else if let data, let image = NSImage(data: data) {
                 if ext == "gif" { DeskAnimatedImage(image: image) }
                 else { ScrollView([.horizontal, .vertical]) { Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 1200).padding(8) } }

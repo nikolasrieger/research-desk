@@ -22,5 +22,23 @@ final class ArtifactHTMLTests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 0)
         let paths = try JSONDecoder().decode([String].self, from: data)
         XCTAssertEqual(Set(paths), Set(files.keys.filter { $0 != "unrelated.bin" }))
+        let archiveURL = root.appendingPathComponent("bundle.tar")
+        FileManager.default.createFile(atPath: archiveURL.path, contents: nil)
+        let archive = try FileHandle(forWritingTo: archiveURL)
+        let export = Process()
+        export.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        export.arguments = process.arguments! + ["archive"]
+        export.standardOutput = archive
+        try export.run(); export.waitUntilExit(); try archive.close()
+        XCTAssertEqual(export.terminationStatus, 0)
+        let extracted = root.appendingPathComponent("extracted")
+        try FileManager.default.createDirectory(at: extracted, withIntermediateDirectories: true)
+        let (_, failure, code) = Command.run("/usr/bin/tar", ["-xf", archiveURL.path, "-C", extracted.path])
+        XCTAssertEqual(code, 0, failure)
+        for path in paths {
+            XCTAssertEqual(try Data(contentsOf: extracted.appendingPathComponent(path)), try Data(contentsOf: root.appendingPathComponent(path)))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: extracted.appendingPathComponent("unrelated.bin").path))
+
     }
 }

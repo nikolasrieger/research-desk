@@ -513,7 +513,7 @@ enum Command {
     static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     private static let sshLock = NSLock()
-    static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000) -> (String, String, Int32) {
+    static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000, timeout: TimeInterval = 12) -> (String, String, Int32) {
         guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             return ("", "Invalid SSH host", -1)
         }
@@ -523,7 +523,7 @@ enum Command {
             arguments += ["-o", "ControlMaster=auto", "-o", "ControlPersist=2m", "-o", "ControlPath=\(sshControlDirectory)/%C"]
         }
         arguments += [host, command]
-        return run("/usr/bin/ssh", arguments, maxOutput: maxOutput)
+        return run("/usr/bin/ssh", arguments, timeout: timeout, maxOutput: maxOutput)
     }
 
     static func closeSSHConnections(hosts: [String]) {
@@ -998,10 +998,7 @@ enum Command {
                         }.padding(.horizontal, 12)
                     }
                     if !model.storageError.isEmpty {
-                        Label(model.storageError, systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11)).foregroundStyle(.orange)
-                            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                        DeskErrorBanner(message: model.storageError, title: "Could not save workspace")
                             .padding(.horizontal, 10).padding(.bottom, 8)
                     }
                     Button { showUsage = true } label: { Label("Settings · Claude usage", systemImage: "gearshape") }
@@ -1090,7 +1087,7 @@ enum Command {
                             if model.remoteBrowserBusy { ProgressView().controlSize(.small) }
                         }
                         if !model.remoteBrowserError.isEmpty {
-                            Text(model.remoteBrowserError).foregroundStyle(.red).textSelection(.enabled)
+                            DeskErrorBanner(message: model.remoteBrowserError, title: "Could not browse remote files")
                         }
                         List(model.remoteEntries) { entry in
                             HStack {
@@ -1154,7 +1151,8 @@ struct ProjectDetail: View {
                 Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(DeskButtonStyle()).help("Refresh project status").disabled(model.busy)
             }.padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 20)
-            HStack(spacing: 2) {
+            ScrollView(.horizontal) {
+              HStack(spacing: 2) {
                 if sidebarHidden { DeskSidebarToggle().padding(.trailing, 6) }
                 tabButton("Files", "folder", 0)
                 tabButton("Agent console", "terminal", 1)
@@ -1162,8 +1160,10 @@ struct ProjectDetail: View {
                 tabButton("Notes", "note.text", 3)
                 tabButton("Papers", "book", 4)
                 tabButton("Artifacts", "globe", 5)
+                tabButton("Overnight sessions", "moon.stars", 6)
                 Spacer()
-            }.padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 12)
+              }
+            }.scrollIndicators(.hidden).padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 12)
             Rectangle().fill(DeskStyle.edge).frame(height: 0.5)
             Group {
                 switch tab {
@@ -1172,6 +1172,7 @@ struct ProjectDetail: View {
                 case 2: machineTerminal
                 case 4: PapersPane(project: project, model: model, library: model.papers, showAgent: { model.projectTabs[project.id] = 1 }, showTerminal: { model.projectTabs[project.id] = 2 })
                 case 5: ArtifactsPane(session: model.sessions[project.id], project: project).id(model.sessions[project.id].map(ObjectIdentifier.init))
+                case 6: OvernightSessionsPane(project: project)
                 default: notesPane
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1197,8 +1198,7 @@ struct ProjectDetail: View {
                         .popover(isPresented: $showGitError) {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Git status").font(.headline)
-                                Text(snapshot.error).font(.system(size: 12, design: .monospaced))
-                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                DeskErrorBanner(message: snapshot.error, title: "Could not read Git status")
                             }.padding(20).frame(width: 440)
                         }
                     Spacer()
@@ -1317,7 +1317,7 @@ struct ProjectDetail: View {
                             }
                         }
                     }.padding(.top, 12)
-                    if !model.agentError.isEmpty { Text(model.agentError).font(.caption).foregroundStyle(.orange) }
+                    if !model.agentError.isEmpty { DeskErrorBanner(message: model.agentError, title: "Could not start agent") }
                 }.padding(20).frame(maxWidth: 960, alignment: .topLeading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }

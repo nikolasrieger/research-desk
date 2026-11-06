@@ -62,8 +62,7 @@ struct PaperWorkspace: View {
     private var console: some View {
         VStack(alignment: .leading, spacing: 14) {
             if !model.paperError.isEmpty {
-                Label(model.paperError, systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange).padding(.horizontal, 16).padding(.top, 8)
+                DeskErrorBanner(message: model.paperError, title: "Paper workspace needs attention").padding(.horizontal, 16).padding(.top, 8)
             }
             if let session = model.paperAgent {
                 AgentConsole(session: session, stopSession: {
