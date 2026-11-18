@@ -1091,6 +1091,14 @@ struct BriefAgentView: View {
             Button { dictation.cancel(); session.reload() } label: { Image(systemName: "arrow.clockwise") }
                 .help("Reload this conversation and reconnect after a dropped connection")
                 .accessibilityLabel("Reload conversation").disabled(session.reloading || session.loadingHistory)
+            Button {
+                guard let response = session.current else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(response.markdown, forType: .string)
+            } label: { Label("Copy", systemImage: "doc.on.doc") }
+                .help("Copy the full displayed response as Markdown")
+                .accessibilityLabel("Copy full response")
+                .disabled(session.current == nil)
             Spacer(minLength: 4)
             if session.index < session.replies.count - 1 {
                 Button("Latest") { session.index = session.replies.count - 1 }
