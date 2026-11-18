@@ -1537,9 +1537,7 @@ struct NotesPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Project notes").font(.system(size: 14, weight: .medium))
-                }
+                Text("Project notes").font(.system(size: 14, weight: .medium))
                 Spacer()
                 ConsolePasteMenu(text: model.notes[project.id] ?? "", project: project, model: model, showAgent: showAgent, showTerminal: showTerminal)
             }
