@@ -91,26 +91,27 @@ struct MarkdownPreview: View {
                     switch block.kind {
                     case .heading(let level):
                         inline(block.text)
-                            .font(.system(size: level == 1 ? 27 : level == 2 ? 22 : 17, weight: .semibold))
+                            .font(.system(size: level == 1 ? 27 : level == 2 ? 22 : 17, weight: .bold, design: .monospaced))
                             .padding(.top, level == 1 ? 10 : 4)
                     case .paragraph:
-                        inline(block.text).font(.system(size: 14)).lineSpacing(5)
+                        inline(block.text).font(.system(size: 14, design: .monospaced)).lineSpacing(5)
                     case .bullet:
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text("•").foregroundStyle(DeskStyle.accent)
-                            inline(block.text).font(.system(size: 14)).lineSpacing(4)
+                            inline(block.text).font(.system(size: 14, design: .monospaced)).lineSpacing(4)
                         }
                     case .quote:
                         HStack(alignment: .top, spacing: 12) {
                             RoundedRectangle(cornerRadius: 2).fill(DeskStyle.accent.opacity(0.45)).frame(width: 3)
-                            inline(block.text).font(.system(size: 14)).foregroundStyle(DeskStyle.muted)
+                            inline(block.text).font(.system(size: 14, design: .monospaced)).foregroundStyle(DeskStyle.muted)
                         }.padding(.vertical, 3)
                     case .code:
                         if rendersTables {
                             ScrollView(.horizontal) {
                                 Text(block.text).font(.system(size: 12, design: .monospaced))
                                     .fixedSize(horizontal: true, vertical: false).padding(15)
-                            }.background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
+                            }.background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 2))
+                                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5))
                         } else {
                             Text(block.text).font(.system(size: 12, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading).padding(15)

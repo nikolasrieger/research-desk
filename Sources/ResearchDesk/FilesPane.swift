@@ -498,12 +498,9 @@ struct FilesPane: View {
                 }
             }
         } else {
-            VStack(spacing: 12) {
-                DeskSpatialMark()
-                DeskEyebrow(title: "Workspace files")
-                Text("Select a file").font(.system(size: 25, weight: .light)).tracking(-0.6)
-                Text("Text, Markdown, images, GIFs, and videos").font(.system(size: 12)).foregroundStyle(DeskStyle.muted)
-            }
+            Text("Select a file")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(DeskStyle.muted)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

@@ -4,22 +4,23 @@ import Darwin
 import SwiftTerm
 
 enum DeskStyle {
-    static let background = Color(red: 0.025, green: 0.025, blue: 0.035)
-    static let sidebar = Color(red: 0.045, green: 0.045, blue: 0.06)
-    static let surface = Color(red: 0.065, green: 0.065, blue: 0.085)
-    static let raised = Color(red: 0.24, green: 0.245, blue: 0.37).opacity(0.35)
-    static let edge = Color(red: 0.73, green: 0.73, blue: 0.81).opacity(0.16)
-    static let muted = Color(red: 0.62, green: 0.62, blue: 0.67)
-    static let accent = Color(red: 0.89, green: 0.89, blue: 0.91)
-    static let violet = Color(red: 0.44, green: 0.44, blue: 0.82)
-    static let running = Color(red: 0.61, green: 0.66, blue: 0.48)
-    static let terminalBackground = NSColor(red: 0.025, green: 0.025, blue: 0.035, alpha: 1)
+    static let background = Color(red: 0.065, green: 0.065, blue: 0.060)
+    static let sidebar = Color(red: 0.085, green: 0.085, blue: 0.078)
+    static let surface = Color(red: 0.085, green: 0.085, blue: 0.078)
+    static let raised = Color(red: 0.15, green: 0.15, blue: 0.135)
+    static let edge = Color.white.opacity(0.23)
+    static let muted = Color(red: 0.62, green: 0.62, blue: 0.57)
+    static let accent = Color(red: 0.93, green: 0.93, blue: 0.87)
+    static let highlight = Color(red: 1, green: 0.88, blue: 0)
+    static let running = Color(red: 0.18, green: 0.52, blue: 0.29)
+    // The embedded terminal retains a dark background for ANSI color legibility.
+    static let terminalBackground = NSColor(red: 0.075, green: 0.082, blue: 0.090, alpha: 1)
 }
 
 struct DeskVibrancy: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material = .hudWindow
+        view.material = .sidebar
         view.blendingMode = .behindWindow
         view.state = .followsWindowActiveState
         return view
@@ -27,57 +28,33 @@ struct DeskVibrancy: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-/// A dark glass backdrop with a quiet violet reflection.
+/// Paper-like workspace chrome inspired by the Horizon report.
 struct DeskMetalSurface: View {
     var body: some View {
-        DeskVibrancy()
-            .overlay(DeskStyle.background.opacity(0.88))
-            .overlay {
-                LinearGradient(colors: [DeskStyle.violet.opacity(0.075), .clear, .white.opacity(0.015)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-            }
-            .allowsHitTesting(false).accessibilityHidden(true)
+        DeskStyle.sidebar.allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 
 struct DeskMetalPlate: View {
-    var radius: CGFloat = 12
+    var radius: CGFloat = 2
     var pressed = false
     var body: some View {
-        RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(LinearGradient(colors: [Color(red: 0.20, green: 0.20, blue: 0.27).opacity(pressed ? 0.9 : 0.65),
-                                          Color(red: 0.09, green: 0.09, blue: 0.12).opacity(0.85)],
-                                 startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [.white.opacity(0.23), DeskStyle.edge.opacity(0.4), .white.opacity(0.09)],
-                                                 startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.75)
-            }
-            .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+        RoundedRectangle(cornerRadius: 2)
+            .fill(pressed ? DeskStyle.raised : DeskStyle.highlight.opacity(0.13))
+            .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.accent, lineWidth: 1) }
             .allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 
-/// Static layered planes for workspace empty states.
 struct DeskSpatialMark: View {
     var body: some View {
-        ZStack {
-            ForEach(0..<7) { index in
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(LinearGradient(colors: [DeskStyle.violet.opacity(0.16), DeskStyle.surface.opacity(0.7)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10).strokeBorder(DeskStyle.accent.opacity(0.12), lineWidth: 0.75)
-                    }
-                    .frame(width: 72, height: 94)
-                    .rotation3DEffect(.degrees(-28), axis: (x: 0, y: 1, z: 0))
-                    .rotationEffect(.degrees(Double(index - 3) * 8))
-                    .offset(x: CGFloat(index - 3) * 23, y: CGFloat(abs(index - 3)) * 7)
-            }
-            DeskMark(size: 36)
-        }
-        .frame(width: 240, height: 140)
-        .allowsHitTesting(false).accessibilityHidden(true)
+        DeskMark(size: 44)
+            .frame(width: 96, height: 96)
+            .background(DeskStyle.highlight)
+            .overlay { Rectangle().strokeBorder(DeskStyle.accent, lineWidth: 2) }
+            .shadow(color: DeskStyle.accent, radius: 0, x: 5, y: 5)
+            .frame(width: 240, height: 140)
+            .allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 
@@ -86,7 +63,7 @@ struct DeskEyebrow: View {
     var body: some View {
         Text(title.uppercased())
             .font(.system(size: 9, weight: .medium, design: .monospaced))
-            .tracking(2).foregroundStyle(DeskStyle.muted)
+            .tracking(1.3).foregroundStyle(DeskStyle.muted)
     }
 }
 
@@ -108,16 +85,19 @@ struct DeskButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .font(.system(size: 12, weight: prominent ? .medium : .regular))
-                .foregroundStyle(Color.primary.opacity(prominent ? 1 : 0.82))
-                .padding(.horizontal, compact ? 6 : 9)
-                .frame(minHeight: 30)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(prominent ? Color.black : DeskStyle.accent.opacity(hovered ? 1 : 0.84))
+                .padding(.horizontal, compact ? 7 : 11)
+                .frame(minHeight: compact ? 26 : 31)
                 .background {
-                    if prominent || hovered || configuration.isPressed {
-                        DeskMetalPlate(pressed: configuration.isPressed)
-                    }
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(prominent ? DeskStyle.highlight.opacity(configuration.isPressed ? 0.75 : 1) : Color.white.opacity(configuration.isPressed ? 0.10 : hovered ? 0.045 : 0))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .strokeBorder(DeskStyle.accent.opacity(prominent ? 1 : hovered ? 0.5 : 0.22), lineWidth: 0.5)
+                        }
                 }
-                .contentShape(RoundedRectangle(cornerRadius: 6))
+                .contentShape(RoundedRectangle(cornerRadius: 2))
                 .opacity(isEnabled ? 1 : 0.38)
                 .onHover { hovered = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovered)
@@ -130,15 +110,21 @@ struct DeskTab: View {
     let title: String
     let selected: Bool
     let action: () -> Void
+    @State private var hovered = false
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 12, weight: selected ? .medium : .regular))
-                .foregroundStyle(selected ? Color.primary : DeskStyle.muted)
-                .padding(.horizontal, 14).frame(height: 34)
-                .background { if selected { DeskMetalPlate(radius: 17) } }
+                .font(.system(size: 11, weight: selected ? .bold : .medium, design: .monospaced))
+                .foregroundStyle(selected ? Color.black : hovered ? DeskStyle.accent.opacity(0.85) : DeskStyle.muted)
+                .padding(.horizontal, 13).frame(height: 33)
+                .background(DeskStyle.highlight.opacity(selected ? 1 : hovered ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 2))
+                .overlay(alignment: .bottom) {
+                    if selected { Rectangle().fill(DeskStyle.accent).frame(height: 2).padding(.horizontal, 13) }
+                }
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovered)
             .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
@@ -149,8 +135,8 @@ struct DeskFieldStyle: TextFieldStyle {
         configuration.textFieldStyle(.plain)
             .font(.system(size: 12))
             .padding(.horizontal, 10).frame(height: 32)
-            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
-            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+            .background(DeskStyle.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 2))
+            .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
     }
 }
 
@@ -165,9 +151,9 @@ struct DeskMenuLabel: View {
         }
         .font(.system(size: 12)).foregroundStyle(DeskStyle.accent)
         .padding(.horizontal, 10).frame(height: 30)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
-        .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
-        .contentShape(RoundedRectangle(cornerRadius: 6))
+        .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 2))
+        .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+        .contentShape(RoundedRectangle(cornerRadius: 2))
     }
 }
 
@@ -934,12 +920,12 @@ enum Command {
                     HStack {
                         HStack(spacing: 10) {
                             DeskMark(size: 23)
-                            Text("research desk").font(.system(size: 15, weight: .medium)).tracking(-0.5)
+                            Text("RESEARCH DESK").font(.system(size: 14, weight: .black, design: .monospaced)).tracking(-0.5)
                         }.foregroundStyle(DeskStyle.accent)
                         Spacer()
                         DeskSidebarToggle()
                     }.foregroundStyle(DeskStyle.muted)
-                        .padding(.horizontal, 22).padding(.top, 20).padding(.bottom, 18)
+                        .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
                     Button { model.selectPaperWorkspace() } label: {
                         HStack(spacing: 11) {
                             Image(systemName: "book.closed")
@@ -956,7 +942,7 @@ enum Command {
                         .padding(.horizontal, 10).padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background { if model.paperSelected { DeskMetalPlate() } }
-                    }.buttonStyle(.plain).padding(.horizontal, 12).padding(.bottom, 24)
+                    }.buttonStyle(.plain).padding(.horizontal, 12).padding(.bottom, 20)
                     HStack {
                         DeskEyebrow(title: "Workspaces")
                         Spacer()
@@ -980,10 +966,15 @@ enum Command {
                                         Spacer(minLength: 2)
                                         BriefSidebarActivity(project: project, legacyRunning: model.sessions[project.id]?.ended == false)
                                     }
-                                    .padding(.horizontal, 12).padding(.vertical, 11)
+                                    .padding(.horizontal, 12).padding(.vertical, 9)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .background {
-                                        if model.selected == project.id && !model.paperSelected { DeskMetalPlate() }
+                                        if model.selected == project.id && !model.paperSelected {
+                                            DeskMetalPlate()
+                                                .overlay(alignment: .leading) {
+                                                    Rectangle().fill(DeskStyle.accent).frame(width: 2, height: 20).padding(.leading, 1)
+                                                }
+                                        }
                                     }
                                 }
                                 .buttonStyle(.plain)
@@ -1138,7 +1129,7 @@ struct ProjectDetail: View {
                 VStack(alignment: .leading, spacing: 8) {
                     DeskEyebrow(title: project.isRemote ? "Remote workspace" : "Local workspace")
                     HStack(spacing: 8) {
-                        Text(project.name).font(.system(size: 28, weight: .light)).tracking(-0.8)
+                        Text(project.name).font(.system(size: 23, weight: .bold, design: .monospaced)).tracking(-0.6)
                         Button { model.prepareRename(project) } label: {
                             Image(systemName: "pencil").font(.system(size: 11))
                         }.buttonStyle(DeskButtonStyle(compact: true)).help("Rename project")
@@ -1150,7 +1141,7 @@ struct ProjectDetail: View {
                 Spacer()
                 Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(DeskButtonStyle()).help("Refresh project status").disabled(model.busy)
-            }.padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 20)
+            }.padding(.horizontal, 26).padding(.top, 18).padding(.bottom, 14)
             ScrollView(.horizontal) {
               HStack(spacing: 2) {
                 if sidebarHidden { DeskSidebarToggle().padding(.trailing, 6) }

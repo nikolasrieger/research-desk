@@ -1061,20 +1061,37 @@ struct BriefAgentView: View {
     }
 
     private var contextIndicator: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(session.contextUsage.label).font(.caption.monospaced())
-                    .foregroundStyle(session.contextUsage.isLarge ? Color.orange : DeskStyle.muted)
-                Spacer(minLength: 4)
-                Button("Start a new chat", action: startNewChat)
-                    .buttonStyle(DeskButtonStyle(compact: true))
-                    .disabled(session.running || session.loadingHistory || session.reloading || (session.replies.isEmpty && session.contextUsage.tokens == nil))
+        let usage = session.contextUsage
+        // A missing reported window is shown against the warning threshold,
+        // rather than presenting an assumed capacity as an actual limit.
+        let capacity = max(1, usage.limit ?? usage.warningThreshold)
+        let fraction = min(1, max(0, Double(usage.tokens ?? 0) / Double(capacity)))
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(usage.tokens == nil ? "CONTEXT · AWAITING USAGE" : "CONTEXT")
+                    Spacer(minLength: 4)
+                    if let tokens = usage.tokens {
+                        Text(usage.limit.map { "\(tokens.formatted()) / \($0.formatted())" } ?? "\(tokens.formatted()) tokens")
+                    }
+                }
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(usage.isLarge ? DeskStyle.highlight : DeskStyle.muted)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(DeskStyle.raised)
+                        Rectangle().fill(usage.isLarge ? DeskStyle.highlight : DeskStyle.accent.opacity(0.6))
+                            .frame(width: geometry.size.width * fraction)
+                    }
+                }.frame(height: 5)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(usage.label)
             }
-            if session.contextUsage.isLarge {
-                DeskErrorBanner(message: "Start a new chat to continue with a reference to this conversation and a smaller context.", title: "Chat context is getting large")
-            }
+            Button("Start a new chat", action: startNewChat)
+                .buttonStyle(DeskButtonStyle(compact: true))
+                .disabled(session.running || session.loadingHistory || session.reloading || (session.replies.isEmpty && usage.tokens == nil))
         }.padding(.horizontal, 14).padding(.bottom, 10)
-            .help("Latest context tokens reported by Claude, including cached input and output. This is the active context size, not cumulative billing. Warns at 75% of the reported context window, or 150,000 tokens when the window is unknown.")
+            .help("Latest active context, including cached input and output. The bar uses Claude's reported context window when available; otherwise it measures toward the 150,000-token warning threshold. A new chat references this conversation.")
     }
 
     private func openFileLink(_ url: URL) -> OpenURLAction.Result {
@@ -1167,6 +1184,7 @@ struct BriefAgentView: View {
                     .keyboardShortcut(.return, modifiers: .command)
             }
         }.padding(16).background { DeskMetalSurface() }
+            .overlay(alignment: .top) { DeskStyle.edge.frame(height: 0.5) }
     }
     private var modelSelector: some View {
         Menu {

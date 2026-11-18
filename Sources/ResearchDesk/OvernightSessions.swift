@@ -179,28 +179,41 @@ struct OvernightSessionsPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Text("Overnight sessions").font(.system(size: 23, weight: .light))
+                    Text("Overnight sessions").font(.system(size: 23, weight: .bold, design: .monospaced))
                     Spacer()
                     if model.busy { ProgressView().controlSize(.small) }
                     Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy)
                 }.buttonStyle(DeskButtonStyle())
                 Text("Arm one night at a time. Nothing runs until you click the button below.").foregroundStyle(DeskStyle.muted)
-                Picker("Goal", selection: $goal) { ForEach(OvernightGoal.allCases) { Text($0.rawValue).tag($0) } }
+                DeskEyebrow(title: "Goal")
+                DeskChoiceMenu(title: goal.rawValue, choices: OvernightGoal.allCases.map(\.rawValue), selection: goal.rawValue) {
+                    if let value = OvernightGoal(rawValue: $0) { goal = value }
+                }
                 Text(goal.detail).font(.callout).foregroundStyle(DeskStyle.muted)
                 TextField("Additional instructions or questions to investigate", text: $instructions, axis: .vertical)
-                    .lineLimit(3...8).textFieldStyle(DeskFieldStyle())
-                Picker("Model", selection: $selectedModel) {
-                    Text("Sonnet").tag("sonnet"); Text("Opus").tag("opus"); Text("Haiku").tag("haiku")
-                }.frame(maxWidth: 280)
+                    .lineLimit(3...8).textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(DeskStyle.surface)
+                    .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
+                DeskEyebrow(title: "Model")
+                DeskChoiceMenu(title: selectedModel.capitalized, choices: ["Sonnet", "Opus", "Haiku"], selection: selectedModel.capitalized) {
+                    selectedModel = $0.lowercased()
+                }
                 VStack(alignment: .leading, spacing: 7) {
                     Label("1–7 a.m. · " + window.zone, systemImage: "moon")
                     Text(window.start.formatted(date: .abbreviated, time: .shortened) + " – " + window.end.formatted(date: .abbreviated, time: .shortened))
+                    DisclosureGroup("Schedule and budget details") {
                     Text("Runs on " + (project.isRemote ? project.host : "this Mac") + ". The window is saved as absolute times; the machine's timezone does not change it.")
                     Text("Requires Python 3 and Claude Code signed in with a subscription on that machine.")
                     Text("Budget: 14.29 percentage points of weekly usage per day, paced from the weekly reset and including usage already spent. Stops 1 point early; small batches and minute-by-minute checks limit overshoot. Exact enforcement is not supported by Claude's delayed usage meter.")
                     Text("Produces Markdown reports using read/search tools. Project files are not edited. Session limits pause work; missing quota data blocks it. One worker per machine account can run at a time.")
                     if !project.isRemote { Text("This Mac must stay on and awake during the window.").foregroundStyle(.orange) }
-                }.font(.caption).foregroundStyle(DeskStyle.muted).padding(14).background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 8))
+                    }.padding(.top, 8)
+                }.font(.system(size: 11, design: .monospaced)).foregroundStyle(DeskStyle.muted)
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(DeskStyle.surface)
+                    .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
                 Button("Arm this night", systemImage: "moon.stars") {
                     // Only this explicit action installs and starts a detached, one-shot worker.
                     let captured = OvernightWindow.next()
@@ -213,9 +226,9 @@ struct OvernightSessionsPane: View {
                 ForEach(model.jobs) { job in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text(job.goal.components(separatedBy: ":").first ?? job.goal).fontWeight(.medium)
+                            Text(job.goal.components(separatedBy: ":").first ?? job.goal).font(.system(size: 13, weight: .bold, design: .monospaced))
                             Spacer()
-                            Text(job.status.capitalized).foregroundStyle(job.status == "blocked" ? Color.orange : DeskStyle.muted)
+                            Text(job.status.uppercased()).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(job.status == "blocked" ? Color.orange : DeskStyle.muted)
                             if job.active { Button("Cancel") { Task { await model.cancel(job) } } }
                             Button("View report") { Task { await model.openReport(job) } }
                         }.buttonStyle(DeskButtonStyle(compact: true)).disabled(model.busy)
@@ -225,10 +238,11 @@ struct OvernightSessionsPane: View {
                         if job.used != nil { Text(quotaSummary(job)).font(.caption.monospaced()).foregroundStyle(DeskStyle.muted) }
 
                         Text(job.folder).font(.caption2.monospaced()).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
-                    }.padding(14).background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 8))
+                    }.padding(14).background(DeskStyle.surface)
+                        .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
                 }
                 if !model.report.isEmpty {
-                    HStack { Text("Report").font(.headline); Spacer(); Button("Close") { model.report = "" } }
+                    HStack { DeskEyebrow(title: "Report"); Spacer(); Button("Close") { model.report = "" }.buttonStyle(DeskButtonStyle(compact: true)) }
                     MarkdownPreview(source: model.report, rendersTables: true).frame(minHeight: 450)
                 }
             }.padding(24).frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
