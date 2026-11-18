@@ -8,12 +8,25 @@ private struct MarkdownBlock: Identifiable {
     let text: String
 }
 
-struct MarkdownPreview: View {
+private final class MarkdownRenderCache: @unchecked Sendable {
+    final class Blocks: NSObject {
+        let value: [MarkdownBlock]
+        init(_ value: [MarkdownBlock]) { self.value = value }
+    }
+    static let shared = MarkdownRenderCache()
+    let blocks = NSCache<NSString, Blocks>()
+    let inline = NSCache<NSString, NSAttributedString>()
+    init() { blocks.totalCostLimit = 8_000_000; inline.totalCostLimit = 8_000_000 }
+}
+
+struct MarkdownPreview: View, Equatable {
     let source: String
     var rendersTables = false
     var linksFilePaths = false
 
     private var blocks: [MarkdownBlock] {
+        let key = ((rendersTables ? "tables:" : "plain:") + source) as NSString
+        if let cached = MarkdownRenderCache.shared.blocks.object(forKey: key) { return cached.value }
         let lines = source.components(separatedBy: .newlines)
         var result: [MarkdownBlock] = []
         var paragraph: [String] = []
@@ -81,6 +94,7 @@ struct MarkdownPreview: View {
         }
         flushParagraph()
         if !code.isEmpty { append(.code, code.joined(separator: "\n")) }
+        MarkdownRenderCache.shared.blocks.setObject(.init(result), forKey: key, cost: source.utf8.count * 3)
         return result
     }
 
@@ -151,7 +165,12 @@ struct MarkdownPreview: View {
     }
 
     private func inline(_ source: String) -> Text {
+        let key = ((linksFilePaths ? "links:" : "plain:") + source) as NSString
+        if let value = MarkdownRenderCache.shared.inline.object(forKey: key) {
+            return Text(AttributedString(value))
+        }
         if let value = try? AttributedString(markdown: linksFilePaths ? AgentFileLink.linkCodePaths(source) : source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            MarkdownRenderCache.shared.inline.setObject(NSAttributedString(value), forKey: key, cost: source.utf8.count * 4)
             return Text(value)
         }
         return Text(source)

@@ -44,7 +44,8 @@ enum FileBrowserIO {
     """
 
     /// Streams remote bytes to disk, so downloads and movies do not pass through base64 or RAM.
-    static func copyFile(_ project: Project, path: String, to destination: URL, limit: Int? = nil) throws {
+    static func copyFile(_ project: Project, path: String, to destination: URL, limit: Int? = nil, cancellation: PreviewCancellation? = nil) throws {
+        try cancellation?.check()
         if !project.isRemote {
             guard containsPath(path, in: project.path) else {
                 throw CocoaError(.fileReadNoPermission)
@@ -84,7 +85,14 @@ enum FileBrowserIO {
         process.standardError = errors
         try process.run()
         let deadline = Date().addingTimeInterval(300)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        while process.isRunning && Date() < deadline {
+            do { try cancellation?.check() } catch {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+                throw error
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         if process.isRunning { process.terminate(); process.waitUntilExit(); throw NSError(domain: "ResearchDesk", code: 2, userInfo: [NSLocalizedDescriptionKey: "Transfer timed out. Try again."]) }
         guard process.terminationStatus == 0 else {
             let message = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? "Could not download remote file."
@@ -186,6 +194,7 @@ struct FilePreview: Sendable {
     let path: String
     let data: Data
     let isImage: Bool
+    var content: PreviewContent? = nil
 }
 
 @MainActor final class FileBrowserModel: ObservableObject {
@@ -204,6 +213,7 @@ struct FilePreview: Sendable {
     @Published var uncommittedPaths: Set<String> = []
     private var loadingGit = false
     private var requestID = UUID()
+    private var previewCancellation: PreviewCancellation?
 
     func download(path: String) {
         guard !downloading else { return }
@@ -257,6 +267,7 @@ struct FilePreview: Sendable {
     }
 
     func load(_ path: String) {
+        previewCancellation?.cancel()
         guard FileBrowserIO.containsPath(path, in: project.path) else { return }
         refreshGitStatus()
         requestID = UUID()
@@ -281,6 +292,9 @@ struct FilePreview: Sendable {
     }
 
     func show(path: String, name: String) {
+        previewCancellation?.cancel()
+        let cancellation = PreviewCancellation()
+        previewCancellation = cancellation
         requestID = UUID()
         let request = requestID
         loading = true
@@ -294,7 +308,7 @@ struct FilePreview: Sendable {
                 do {
                     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                     let media = MediaPreviewFile(url: folder.appendingPathComponent(URL(fileURLWithPath: name).lastPathComponent))
-                    try FileBrowserIO.copyFile(project, path: path, to: media.url, limit: 500_000_000)
+                    try FileBrowserIO.copyFile(project, path: path, to: media.url, limit: 500_000_000, cancellation: cancellation)
                     await MainActor.run {
                         guard let self, self.requestID == request else { return }
                         self.loading = false
@@ -310,7 +324,8 @@ struct FilePreview: Sendable {
                 }
                 return
             }
-            let (data, failure) = Command.fileData(project, path: path)
+            let (data, failure) = Command.fileData(project, path: path, cancellation: cancellation)
+            let content = data.map { PreviewContent(data: $0, extension: URL(fileURLWithPath: name).pathExtension.lowercased()) }
             await MainActor.run {
                 guard let self, self.requestID == request else { return }
                 self.loading = false
@@ -318,7 +333,7 @@ struct FilePreview: Sendable {
                 if let data {
                     let imageTypes: Set<String> = ["png", "jpg", "jpeg", "gif", "tiff", "tif", "bmp", "heic", "webp"]
                     let image = imageTypes.contains(URL(fileURLWithPath: name).pathExtension.lowercased())
-                    self.preview = FilePreview(name: name, path: path, data: data, isImage: image)
+                    self.preview = FilePreview(name: name, path: path, data: data, isImage: image, content: content)
                 }
             }
         }
@@ -471,15 +486,15 @@ struct FilesPane: View {
                 Rectangle().fill(DeskStyle.edge).frame(height: 1)
                 if let media = preview.media {
                     DeskMoviePlayer(media: media).id(media.url)
-                } else if preview.isGIF, let image = NSImage(data: preview.data) {
+                } else if preview.isGIF, let image = preview.content?.image {
                     DeskAnimatedImage(image: image).padding(24)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if preview.isImage, let image = NSImage(data: preview.data) {
+                } else if preview.isImage, let image = preview.content?.image {
                     ScrollView([.horizontal, .vertical]) {
                         Image(nsImage: image).resizable().scaledToFit()
                             .frame(maxWidth: .infinity, maxHeight: .infinity).padding(24)
                     }
-                } else if let text = String(data: preview.data, encoding: .utf8), !preview.data.contains(0) {
+                } else if let text = preview.content?.text {
                     if browser.renderMarkdown,
                        ["md", "markdown"].contains(URL(fileURLWithPath: preview.name).pathExtension.lowercased()) {
                         MarkdownPreview(source: String(text.prefix(300_000)))

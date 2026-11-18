@@ -43,7 +43,7 @@ struct AgentFilePreview: View {
     let project: Project
     let path: String
     let openLink: (URL) -> OpenURLAction.Result
-    @State private var data: Data?
+    @State private var content: PreviewContent?
     @State private var html: ArtifactHTMLFile?
     @State private var error = ""
     @State private var webError = ""
@@ -63,10 +63,10 @@ struct AgentFilePreview: View {
                 HostedArtifactWebView(url: html?.url ?? URL(fileURLWithPath: path), reload: revision, error: $webError,
                     readAccessRoot: html?.root ?? URL(fileURLWithPath: project.path))
                 if !webError.isEmpty { DeskErrorBanner(message: webError, title: "Preview could not load", onDismiss: { webError = "" }) }
-            } else if let data, let image = NSImage(data: data) {
+            } else if let image = content?.image {
                 if ext == "gif" { DeskAnimatedImage(image: image) }
                 else { ScrollView([.horizontal, .vertical]) { Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 1200).padding(8) } }
-            } else if let data, let text = String(data: data, encoding: .utf8), !data.contains(0) {
+            } else if let text = content?.text {
                 if ["md", "markdown"].contains(ext) {
                     MarkdownPreview(source: text, rendersTables: true, linksFilePaths: true)
                         .environment(\.openURL, OpenURLAction { url in
@@ -82,23 +82,27 @@ struct AgentFilePreview: View {
             } else { ContentUnavailableView("Preview unavailable", systemImage: "doc") }
         }
         .task(id: path + String(revision)) {
-            loading = true; error = ""; webError = ""; data = nil; html = nil
-            let result = await Task.detached { () -> Result<(Data?, ArtifactHTMLFile?), Error> in
+            loading = true; error = ""; webError = ""; content = nil; html = nil
+            let cancellation = PreviewCancellation()
+            let force = revision > 0
+            let result = await withTaskCancellationHandler {
+                await Task.detached { () -> Result<(PreviewContent?, ArtifactHTMLFile?), Error> in
                 Result {
                     if ["html", "htm"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()) {
-                        if project.isRemote { return (nil, try ArtifactHTML.snapshot(project: project, path: path)) }
+                        if project.isRemote { return (nil, try ArtifactHTML.snapshot(project: project, path: path, force: force, cancellation: cancellation)) }
                         guard FileManager.default.isReadableFile(atPath: path) else { throw ResearchError.message("File could not be read: " + path) }
                         return (nil, nil)
                     }
-                    let (data, failure) = Command.fileData(project, path: path)
+                    let (data, failure) = Command.fileData(project, path: path, cancellation: cancellation)
                     guard let data else { throw ResearchError.message(failure) }
-                    return (data, nil)
+                    return (PreviewContent(data: data, extension: URL(fileURLWithPath: path).pathExtension.lowercased()), nil)
                 }
-            }.value
+                }.value
+            } onCancel: { cancellation.cancel() }
             guard !Task.isCancelled else { return }
             loading = false
             switch result {
-            case .success(let value): data = value.0; html = value.1
+            case .success(let value): content = value.0; html = value.1
             case .failure(let failure): error = failure.localizedDescription
             }
         }

@@ -3,7 +3,12 @@ import AppKit
 
 /// A persistent, line-oriented Claude Code transport shared by every turn in a conversation.
 final class BriefTransport: @unchecked Sendable {
-    enum Event: Sendable { case line(Data), stderr(String), exit(Int32) }
+    struct Decoded: @unchecked Sendable { let value: [String: Any] }
+    enum Event: Sendable { case decoded(Decoded), stderr(String), exit(Int32) }
+    static func decode(_ data: Data) -> Event? {
+        guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return .decoded(Decoded(value: value))
+    }
     let process = Process()
     private let input = Pipe(), output = Pipe(), errors = Pipe()
     private let writes = DispatchQueue(label: "researchdesk.brief.stdin")
@@ -40,12 +45,12 @@ final class BriefTransport: @unchecked Sendable {
                 if chunk.isEmpty { break }
                 pending.append(chunk)
                 while let end = pending.firstIndex(of: 10) {
-                    continuation.yield(.line(Data(pending[..<end])))
+                    if let event = Self.decode(Data(pending[..<end])) { continuation.yield(event) }
                     pending.removeSubrange(...end)
                 }
                 if pending.count > 8_000_000 { pending.removeAll(); continuation.yield(.stderr("Claude emitted an oversized event; it was omitted.")) }
             }
-            if !pending.isEmpty { continuation.yield(.line(pending)) }
+            if !pending.isEmpty, let event = Self.decode(pending) { continuation.yield(event) }
         }
         group.enter()
         DispatchQueue.global().async { [self] in
@@ -262,6 +267,9 @@ struct BriefAttachment: Identifiable {
     @Published var instruction = ""
     @Published var attachments: [BriefAttachment] = []
     @Published var progress: [String] = []
+    private var pendingProgress: [String] = []
+    private var progressTask: Task<Void, Never>?
+    private var consumingTransport = false
     @Published var permissions: [BriefPermission] = []
     @Published var changes: [BriefChangedFile] = []
     var onActivityChange: (() -> Void)?
@@ -337,6 +345,7 @@ struct BriefAttachment: Identifiable {
         guard !running, !loadingHistory, !reloading, !changingModel, !text.isEmpty else { return }
         let prompt = Self.prompt(text, attachments: attachments)
         guard prompt.utf8.count < 512_000 else { error = "Instruction and selected context exceed 512 KB. Select fewer lines."; return }
+        progressTask?.cancel(); progressTask = nil; pendingProgress.removeAll()
         error = ""; permissions = []; progress = []; seenToolIDs.removeAll(); running = true; receivedResult = false; resultFailed = false; finalResponse = BriefFinalResponse()
         if title == "New conversation" { title = String(text.prefix(90)) }
         interrupted = false
@@ -364,9 +373,14 @@ struct BriefAttachment: Identifiable {
                 for await event in events {
                     guard transport === connection else { continue }
                     switch event {
-                    case .line(let data): consume(data)
+                    case .decoded(let event):
+                        consumingTransport = true
+                        consume(event.value)
+                        consumingTransport = false
+                        if ["result", "control_request"].contains(event.value["type"] as? String ?? "") { flushProgress() }
                     case .stderr(let text): error = String((error + text).suffix(16_000))
                     case .exit(let code):
+                        flushProgress()
                         if running {
                             if !receivedResult {
                                 if error.isEmpty { error = "Claude exited without a final response (exit \(code)). You can send another instruction to resume." }
@@ -464,8 +478,14 @@ struct BriefAttachment: Identifiable {
     }
 
     func consume(_ data: Data) {
-        guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let type = event["type"] as? String else { return }
-        contextUsage.observe(event)
+        guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        consume(event)
+    }
+    private func consume(_ event: [String: Any]) {
+        guard let type = event["type"] as? String else { return }
+        var usage = contextUsage
+        usage.observe(event)
+        if usage != contextUsage { contextUsage = usage }
         switch type {
         case "control_response":
             if let response = event["response"] as? [String: Any], let pending = pendingModelChange,
@@ -585,11 +605,30 @@ struct BriefAttachment: Identifiable {
         if !error.isEmpty && status == error { status = "Request interrupted" }
         error = ""
     }
-    func log(_ message: String) {
-        guard progress.last != message else { return }
-        progress.append(message)
-        if progress.count > 150 { progress.removeFirst(progress.count - 150) }
+    private func flushProgress() {
+        progressTask?.cancel(); progressTask = nil
+        guard !pendingProgress.isEmpty else { return }
+        progress = Array((progress + pendingProgress).suffix(150))
+        pendingProgress.removeAll(keepingCapacity: true)
     }
+    func log(_ message: String) {
+        guard (pendingProgress.last ?? progress.last) != message else { return }
+        if consumingTransport {
+            pendingProgress.append(message)
+            if pendingProgress.count > 150 { pendingProgress.removeFirst(pendingProgress.count - 150) }
+            if progressTask == nil {
+                progressTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                    self?.flushProgress()
+                }
+            }
+        } else {
+            flushProgress()
+            progress.append(message)
+            if progress.count > 150 { progress.removeFirst(progress.count - 150) }
+        }
+    }
+
     func answer(_ permission: BriefPermission, allow: Bool) {
         let reply: [String: Any] = allow ? ["behavior": "allow", "updatedInput": permission.input] : ["behavior": "deny", "message": "The user declined this tool action."]
         transport?.send(["type": "control_response", "response": ["subtype": "success", "request_id": permission.id, "response": reply]])
@@ -1030,7 +1069,7 @@ struct BriefAgentView: View {
                     contextIndicator
                     if let reply = session.current {
                         BriefInstructionPreview(source: reply.instruction).id(reply.id)
-                        MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).id(reply.id)
+                        MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).equatable().id(reply.id)
                             .environment(\.openURL, OpenURLAction { openFileLink($0) })
                     } else {
                         VStack(alignment: .leading, spacing: 14) {

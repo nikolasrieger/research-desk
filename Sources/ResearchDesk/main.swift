@@ -498,12 +498,22 @@ enum Command {
 
     static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    private static let sshLock = NSLock()
+    private final class HostLocks: @unchecked Sendable {
+        let lock = NSLock()
+        var hosts: [String: NSLock] = [:]
+        func forHost(_ host: String) -> NSLock {
+            lock.lock(); defer { lock.unlock() }
+            if let existing = hosts[host] { return existing }
+            let value = NSLock(); hosts[host] = value; return value
+        }
+    }
+    private static let sshLocks = HostLocks()
     static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000, timeout: TimeInterval = 12) -> (String, String, Int32) {
         guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             return ("", "Invalid SSH host", -1)
         }
-        sshLock.lock(); defer { sshLock.unlock() }
+        let hostLock = sshLocks.forHost(host)
+        hostLock.lock(); defer { hostLock.unlock() }
         var arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
         if let sshControlDirectory {
             arguments += ["-o", "ControlMaster=auto", "-o", "ControlPersist=2m", "-o", "ControlPath=\(sshControlDirectory)/%C"]
@@ -530,15 +540,15 @@ enum Command {
         return (listing, "")
     }
 
-    static func fileData(_ project: Project, path: String) -> (Data?, String) {
+    static func fileData(_ project: Project, path: String, cancellation: PreviewCancellation? = nil) -> (Data?, String) {
         let limit = 15_000_000
         if project.isRemote {
-            let python = FileBrowserIO.remotePreviewScript
-            let command = "python3 -c " + shellQuote(python) + " " + shellQuote(project.path) + " " + shellQuote(path)
-            let (output, error, status) = ssh(project.host, command, maxOutput: 21_000_000)
-            guard status == 0 else { return (nil, error.isEmpty ? "Could not read remote file" : error) }
-            guard let data = Data(base64Encoded: output) else { return (nil, "Could not decode remote file") }
-            return (data, "")
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("preview-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: url) }
+            do {
+                try FileBrowserIO.copyFile(project, path: path, to: url, limit: limit, cancellation: cancellation)
+                return (try Data(contentsOf: url), "")
+            } catch { return (nil, error.localizedDescription) }
         }
         guard FileBrowserIO.containsPath(path, in: project.path) else { return (nil, "File is outside this project") }
         let file = URL(fileURLWithPath: path).resolvingSymlinksInPath()
@@ -559,15 +569,41 @@ enum Command {
 
     static func snapshot(_ project: Project) -> Snapshot {
         var result = Snapshot()
-        let (branch, branchError, branchCode) = git(project, ["branch", "--show-current"])
-        if branchCode != 0 { result.error = branchError; return result }
-        result.branch = branch.isEmpty ? "detached HEAD" : branch
-        let (status, statusError, statusCode) = git(project, ["status", "--short"])
-        if statusCode != 0 { result.error = statusError; return result }
-        result.files = status.split(separator: "\n").map(String.init)
+        if !project.isRemote {
+            let (branch, failure, code) = git(project, ["branch", "--show-current"])
+            guard code == 0 else { result.error = failure; return result }
+            result.branch = branch.isEmpty ? "detached HEAD" : branch
+            let (status, error, statusCode) = git(project, ["status", "--short"])
+            guard statusCode == 0 else { result.error = error; return result }
+            result.files = status.split(separator: "\n").map(String.init)
+            result.changes = result.files.count
+            let (log, _, _) = git(project, ["log", "-1", "--format=%h · %s"])
+            result.summary = log.isEmpty ? "No commits yet" : log
+            return result
+        }
+        let script = """
+        import subprocess,json,sys
+        def git(*args):
+            p=subprocess.run(['git','-C',sys.argv[1],*args],capture_output=True,text=True)
+            if p.returncode: raise RuntimeError(p.stderr.strip())
+            return p.stdout.strip()
+        try:
+            print(json.dumps({'branch':git('branch','--show-current') or 'detached HEAD',
+                              'files':git('status','--short').splitlines(),
+                              'summary':subprocess.run(['git','-C',sys.argv[1],'log','-1','--format=%h · %s'],capture_output=True,text=True).stdout.strip()}))
+        except RuntimeError as e: sys.exit(str(e))
+        """
+        let command = "python3 -c " + shellQuote(script) + " " + shellQuote(project.path)
+        let (output, error, code) = project.isRemote ? ssh(project.host, command) : run("/usr/bin/env", ["python3", "-c", script, project.path])
+        guard code == 0, let data = output.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            result.error = error.isEmpty ? "Could not read project status" : error
+            return result
+        }
+        result.branch = value["branch"] as? String ?? "—"
+        result.files = value["files"] as? [String] ?? []
         result.changes = result.files.count
-        let (log, _, _) = git(project, ["log", "-1", "--format=%h · %s"])
-        result.summary = log.isEmpty ? "No commits yet" : log
+        result.summary = (value["summary"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "No commits yet"
         return result
     }
 }
@@ -806,11 +842,22 @@ enum Command {
         guard !busy else { return }
         busy = true
         let entries = projects
-        Task.detached { [weak self] in
-            var fresh: [UUID: Snapshot] = [:]
-            for project in entries { fresh[project.id] = Command.snapshot(project) }
-            let completed = fresh
-            await MainActor.run { self?.snapshots = completed; self?.busy = false }
+        Task { [weak self] in
+            await withTaskGroup(of: (UUID, Snapshot).self) { group in
+                var pending = entries.makeIterator()
+                for _ in 0..<min(3, entries.count) {
+                    if let project = pending.next() {
+                        group.addTask { (project.id, Command.snapshot(project)) }
+                    }
+                }
+                for await (id, snapshot) in group {
+                    if self?.projects.contains(where: { $0.id == id }) == true { self?.snapshots[id] = snapshot }
+                    if let project = pending.next() {
+                        group.addTask { (project.id, Command.snapshot(project)) }
+                    }
+                }
+            }
+            self?.busy = false
         }
     }
 
@@ -1492,7 +1539,6 @@ struct NotesPane: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Project notes").font(.system(size: 14, weight: .medium))
-                    Text("Saved automatically on this Mac.").font(.caption).foregroundStyle(DeskStyle.muted)
                 }
                 Spacer()
                 ConsolePasteMenu(text: model.notes[project.id] ?? "", project: project, model: model, showAgent: showAgent, showTerminal: showTerminal)

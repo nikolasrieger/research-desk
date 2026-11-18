@@ -9,7 +9,27 @@ final class ArtifactHTMLFile: Sendable {
 }
 
 enum ArtifactHTML {
-    static func snapshot(project: Project, path: String) throws -> ArtifactHTMLFile {
+    private final class Cache: @unchecked Sendable {
+        let lock = NSLock()
+        var entries: [String: (Date, ArtifactHTMLFile)] = [:]
+        func get(_ key: String) -> ArtifactHTMLFile? {
+            lock.lock(); defer { lock.unlock() }
+            guard let entry = entries[key], Date().timeIntervalSince(entry.0) < 60 else {
+                entries.removeValue(forKey: key); return nil
+            }
+            return entry.1
+        }
+        func put(_ key: String, _ value: ArtifactHTMLFile) {
+            lock.lock(); defer { lock.unlock() }
+            // Keep at most one bundle on disk beyond those actively displayed.
+            entries = [key: (Date(), value)]
+        }
+    }
+    private static let cache = Cache()
+    static func snapshot(project: Project, path: String, force: Bool = false, cancellation: PreviewCancellation? = nil) throws -> ArtifactHTMLFile {
+        try cancellation?.check()
+        let key = project.host + "\n" + project.path + "\n" + path
+        if !force, let existing = cache.get(key) { return existing }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("artifact-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let page = URL(fileURLWithPath: path).standardizedFileURL.path
@@ -20,14 +40,16 @@ enum ArtifactHTML {
         let archive = root.appendingPathComponent(".assets-" + UUID().uuidString + ".tar")
         defer { try? FileManager.default.removeItem(at: archive) }
         let command = "python3 -c " + Command.shellQuote(assetScript) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " archive"
-        try transfer(host: project.host, command: command, destination: archive)
+        try transfer(host: project.host, command: command, destination: archive, cancellation: cancellation)
         let (_, failure, code) = Command.run("/usr/bin/tar", ["-xf", archive.path, "-C", root.path], timeout: 60, maxOutput: 2000)
         guard code == 0 else { throw ResearchError.message(failure.isEmpty ? "Could not unpack HTML assets." : failure) }
+        try cancellation?.check()
+        cache.put(key, snapshot)
         return snapshot
     }
 
     /// One SSH connection streams all assets to disk, avoiding per-file connection latency.
-    private static func transfer(host: String, command: String, destination: URL) throws {
+    private static func transfer(host: String, command: String, destination: URL, cancellation: PreviewCancellation?) throws {
         guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             throw ResearchError.message("Invalid SSH host.")
         }
@@ -44,6 +66,11 @@ enum ArtifactHTML {
         try process.run()
         let deadline = Date().addingTimeInterval(300)
         while process.isRunning && Date() < deadline {
+            do { try cancellation?.check() } catch {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+                throw error
+            }
             if let size = (try? FileManager.default.attributesOfItem(atPath: destination.path)[.size]) as? NSNumber, size.intValue > 505_000_000 {
                 process.terminate(); process.waitUntilExit()
                 throw ResearchError.message("HTML assets exceed the 500 MB preview limit.")

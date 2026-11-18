@@ -99,8 +99,8 @@ print(json.dumps({'type':'result','result':'Finished'}), flush=True)
         var code: Int32?
         for await event in stream {
             switch event {
-            case .line(let data):
-                let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            case .decoded(let event):
+                let object = event.value
                 switch object["type"] as? String {
                 case "control_response": connection.send(["type": "user", "message": ["role": "user", "content": "Test instruction"]])
                 case "control_request": connection.send(["type": "control_response", "response": ["subtype": "success", "request_id": "p1", "response": ["behavior": "allow", "updatedInput": ["file_path": "file.swift"]]]])

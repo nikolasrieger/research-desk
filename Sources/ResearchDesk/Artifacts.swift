@@ -133,6 +133,7 @@ struct ArtifactsPane: View {
     @State private var loading = false
     @State private var reload = 0
     @State private var request = UUID()
+    @State private var previewCancellation: PreviewCancellation?
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -146,7 +147,7 @@ struct ArtifactsPane: View {
                 HStack {
                     Text(url.isFileURL ? (htmlFile == nil ? "HTML preview" : "Remote HTML preview") : "Sign in to Claude here if the artifact is private.").font(.caption).foregroundStyle(DeskStyle.muted)
                     Spacer()
-                    Button("Reload") { if htmlFile != nil { openHTML(htmlSource) } else { reload += 1 } }
+                    Button("Reload") { if htmlFile != nil { openHTML(htmlSource, force: true) } else { reload += 1 } }
                     Button("Open in browser ↗") { NSWorkspace.shared.open(url) }
                 }.padding(.horizontal, 12).padding(.vertical, 5)
             }
@@ -165,9 +166,10 @@ struct ArtifactsPane: View {
             }
         }.background(DeskStyle.background)
             .task { if let existing = session?.artifactURL { input = existing.absoluteString; url = existing } else if session?.agent == "claude" { discover() } }
-            .onDisappear { request = UUID(); loading = false }
+            .onDisappear { previewCancellation?.cancel(); request = UUID(); loading = false }
     }
     private func chooseHTML() {
+        previewCancellation?.cancel()
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.html]
         panel.canChooseDirectories = false
@@ -176,7 +178,10 @@ struct ArtifactsPane: View {
         request = UUID(); loading = false; htmlFile = nil
         input = selected.absoluteString; url = selected; error = ""; webError = ""
     }
-    private func openHTML(_ value: String) {
+    private func openHTML(_ value: String, force: Bool = false) {
+        previewCancellation?.cancel()
+        let cancellation = PreviewCancellation()
+        previewCancellation = cancellation
         let path: String
         if let file = URL(string: value), file.isFileURL { path = file.path }
         else if value.hasPrefix("/") { path = value }
@@ -194,7 +199,7 @@ struct ArtifactsPane: View {
                         guard FileManager.default.isReadableFile(atPath: path) else { throw ResearchError.message("HTML file could not be read.") }
                         return nil
                     }
-                    return try ArtifactHTML.snapshot(project: project, path: path)
+                    return try ArtifactHTML.snapshot(project: project, path: path, force: force, cancellation: cancellation)
                 }
             }.value
             guard request == token else { return }
@@ -207,6 +212,7 @@ struct ArtifactsPane: View {
         }
     }
     private func open() {
+        previewCancellation?.cancel()
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if !value.lowercased().hasPrefix("https:") { openHTML(value); return }
         guard let parsed = ArtifactLink.parse(input) else { error = "Use a hosted artifact URL on claude.ai or claude.site."; return }
