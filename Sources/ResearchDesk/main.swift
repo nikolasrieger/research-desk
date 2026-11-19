@@ -1174,7 +1174,6 @@ struct ProjectDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 8) {
-                    DeskEyebrow(title: project.isRemote ? "Remote workspace" : "Local workspace")
                     HStack(spacing: 8) {
                         Text(project.name).font(.system(size: 23, weight: .bold, design: .monospaced)).tracking(-0.6)
                         Button { model.prepareRename(project) } label: {
