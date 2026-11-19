@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 private struct MarkdownBlock: Identifiable {
-    enum Kind { case heading(Int), paragraph, bullet, quote, code, rule, table([[String]]) }
+    enum Kind { case heading(Int), paragraph, bullet, quote, code, rule, table([[String]]), image(String) }
     let id: Int
     let kind: Kind
     let text: String
@@ -69,6 +69,9 @@ struct MarkdownPreview: View, Equatable {
             }
             if inCode { code.append(raw); continue }
             if line.isEmpty { flushParagraph(); continue }
+            if let image = NoteImageLink.parse(line) {
+                flushParagraph(); append(.image(image.url.absoluteString), image.alt); continue
+            }
             let hashes = line.prefix(while: { $0 == "#" }).count
             if (1...6).contains(hashes), line.dropFirst(hashes).hasPrefix(" ") {
                 flushParagraph()
@@ -152,6 +155,8 @@ struct MarkdownPreview: View, Equatable {
                                 }
                             }
                         }
+                    case .image(let url):
+                        NoteImagePreview(url: URL(string: url), alt: block.text)
                     case .rule:
                         Rectangle().fill(DeskStyle.edge).frame(height: 1).padding(.vertical, 4)
                     }

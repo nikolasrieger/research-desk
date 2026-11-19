@@ -1527,21 +1527,3 @@ struct AgentConsole: View {
         .onChange(of: session.ended) { _, ended in if ended { dictation.cancel() } }
     }
 }
-
-struct NotesPane: View {
-    let project: Project
-    @ObservedObject var model: DeskModel
-    let showAgent: () -> Void
-    let showTerminal: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Project notes").font(.system(size: 14, weight: .medium))
-                Spacer()
-                ConsolePasteMenu(text: model.notes[project.id] ?? "", project: project, model: model, showAgent: showAgent, showTerminal: showTerminal)
-            }
-            TextEditor(text: Binding(get: { model.notes[project.id] ?? "" }, set: { model.setNote($0, for: project) }))
-                .font(.system(size: 14)).scrollContentBackground(.hidden).accessibilityLabel("Project notes")
-        }.padding(20)
-    }
-}
