@@ -1111,12 +1111,9 @@ struct BriefAgentView: View {
                         MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).equatable().id(reply.id)
                             .environment(\.openURL, OpenURLAction { openFileLink($0) })
                     } else {
-                        VStack(alignment: .leading, spacing: 14) {
-                            Text(session.interrupted ? "This conversation was interrupted." : "Give " + session.agentName + " a direction.").font(.system(size: 24, weight: .light))
-                            Text("Final responses appear here. Tool activity and approval requests stay in Progress. Use Continue to finish an interrupted request, or write a new instruction below.")
-                                .font(.system(size: 12)).foregroundStyle(DeskStyle.muted).lineSpacing(5)
-                            if !session.sessionID.isEmpty { Text("Session \(session.sessionID.prefix(8))").font(.caption.monospaced()).foregroundStyle(DeskStyle.muted) }
-                        }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        Text(session.loadingHistory || session.reloading ? "Loading…" : session.running ? "Working…" : session.interrupted ? "Conversation interrupted." : "Write a message to start.")
+                            .font(.system(size: 12)).foregroundStyle(DeskStyle.muted)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     composer
                 }.frame(minWidth: 240, idealWidth: 600, maxWidth: .infinity)
@@ -1183,10 +1180,6 @@ struct BriefAgentView: View {
     }
     private var responseNavigation: some View {
         HStack {
-            Text("Final response").font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
-            Button { dictation.cancel(); session.reload() } label: { Image(systemName: "arrow.clockwise") }
-                .help("Reload this conversation and reconnect after a dropped connection")
-                .accessibilityLabel("Reload conversation").disabled(session.reloading || session.loadingHistory)
             Button {
                 guard let response = session.current else { return }
                 NSPasteboard.general.clearContents()
