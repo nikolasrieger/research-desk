@@ -4,17 +4,18 @@ import Darwin
 import SwiftTerm
 
 enum DeskStyle {
-    static let background = Color(red: 0.065, green: 0.065, blue: 0.060)
-    static let sidebar = Color(red: 0.085, green: 0.085, blue: 0.078)
-    static let surface = Color(red: 0.085, green: 0.085, blue: 0.078)
-    static let raised = Color(red: 0.15, green: 0.15, blue: 0.135)
-    static let edge = Color.white.opacity(0.23)
-    static let muted = Color(red: 0.62, green: 0.62, blue: 0.57)
-    static let accent = Color(red: 0.93, green: 0.93, blue: 0.87)
-    static let highlight = Color(red: 1, green: 0.88, blue: 0)
-    static let running = Color(red: 0.18, green: 0.52, blue: 0.29)
-    // The embedded terminal retains a dark background for ANSI color legibility.
-    static let terminalBackground = NSColor(red: 0.075, green: 0.082, blue: 0.090, alpha: 1)
+    // Neutral charcoal chrome, with restrained blue focus and selection accents.
+    static let background = Color(white: 0.145)
+    static let sidebar = Color(white: 0.125)
+    static let surface = Color(white: 0.155)
+    static let raised = Color(white: 0.19)
+    static let edge = Color.white.opacity(0.10)
+    static let muted = Color(white: 0.58)
+    static let accent = Color(white: 0.80)
+    static let highlight = Color(red: 0.18, green: 0.48, blue: 0.73)
+    static let running = Color(red: 0.48, green: 0.67, blue: 0.48)
+    static let terminalBackground = NSColor(white: 0.145, alpha: 1)
+
 }
 
 struct DeskVibrancy: NSViewRepresentable {
@@ -28,7 +29,7 @@ struct DeskVibrancy: NSViewRepresentable {
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
-/// Paper-like workspace chrome inspired by the Horizon report.
+/// Quiet charcoal chrome shared by workspace headers and the sidebar.
 struct DeskMetalSurface: View {
     var body: some View {
         DeskStyle.sidebar.allowsHitTesting(false).accessibilityHidden(true)
@@ -36,12 +37,12 @@ struct DeskMetalSurface: View {
 }
 
 struct DeskMetalPlate: View {
-    var radius: CGFloat = 2
+    var radius: CGFloat = 10
     var pressed = false
     var body: some View {
-        RoundedRectangle(cornerRadius: 2)
-            .fill(pressed ? DeskStyle.raised : DeskStyle.highlight.opacity(0.13))
-            .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.accent, lineWidth: 1) }
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(pressed ? Color.white.opacity(0.09) : DeskStyle.raised)
+            .overlay { RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(DeskStyle.edge, lineWidth: 1) }
             .allowsHitTesting(false).accessibilityHidden(true)
     }
 }
@@ -50,9 +51,9 @@ struct DeskSpatialMark: View {
     var body: some View {
         DeskMark(size: 44)
             .frame(width: 96, height: 96)
-            .background(DeskStyle.highlight)
-            .overlay { Rectangle().strokeBorder(DeskStyle.accent, lineWidth: 2) }
-            .shadow(color: DeskStyle.accent, radius: 0, x: 5, y: 5)
+            .background(DeskStyle.raised, in: RoundedRectangle(cornerRadius: 20))
+            .overlay { RoundedRectangle(cornerRadius: 20).strokeBorder(DeskStyle.edge, lineWidth: 1) }
+            .shadow(color: .black.opacity(0.15), radius: 12, y: 4)
             .frame(width: 240, height: 140)
             .allowsHitTesting(false).accessibilityHidden(true)
     }
@@ -61,9 +62,9 @@ struct DeskSpatialMark: View {
 struct DeskEyebrow: View {
     let title: String
     var body: some View {
-        Text(title.uppercased())
+        Text(title)
             .font(.system(size: 9, weight: .medium, design: .monospaced))
-            .tracking(1.3).foregroundStyle(DeskStyle.muted)
+            .tracking(0.2).foregroundStyle(DeskStyle.muted)
     }
 }
 
@@ -85,20 +86,43 @@ struct DeskButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(prominent ? Color.black : DeskStyle.accent.opacity(hovered ? 1 : 0.84))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(prominent ? DeskStyle.highlight : DeskStyle.accent.opacity(hovered ? 1 : 0.84))
                 .padding(.horizontal, compact ? 7 : 11)
                 .frame(minHeight: compact ? 26 : 31)
                 .background {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(prominent ? DeskStyle.highlight.opacity(configuration.isPressed ? 0.75 : 1) : Color.white.opacity(configuration.isPressed ? 0.10 : hovered ? 0.045 : 0))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(prominent ? DeskStyle.highlight.opacity(configuration.isPressed ? 0.24 : 0.14) : Color.white.opacity(configuration.isPressed ? 0.10 : hovered ? 0.045 : 0))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                                .strokeBorder(DeskStyle.accent.opacity(prominent ? 1 : hovered ? 0.5 : 0.22), lineWidth: 0.5)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(DeskStyle.accent.opacity(prominent ? 0.25 : hovered ? 0.22 : 0.12), lineWidth: 0.5)
                         }
                 }
-                .contentShape(RoundedRectangle(cornerRadius: 2))
+                .contentShape(RoundedRectangle(cornerRadius: 8))
                 .opacity(isEnabled ? 1 : 0.38)
+                .onHover { hovered = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovered)
+        }
+    }
+}
+
+/// Soft inset workspace rows, matching the macOS browser sidebar idiom.
+struct DeskSidebarRowStyle: ButtonStyle {
+    let selected: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        Row(configuration: configuration, selected: selected)
+    }
+    private struct Row: View {
+        let configuration: ButtonStyle.Configuration
+        let selected: Bool
+        @State private var hovered = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(DeskStyle.accent)
+                .background {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(selected ? Color.white.opacity(0.115) : Color.white.opacity(configuration.isPressed ? 0.09 : hovered ? 0.045 : 0))
+                }
                 .onHover { hovered = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovered)
         }
@@ -108,20 +132,24 @@ struct DeskButtonStyle: ButtonStyle {
 /// A quiet, shared tab strip for project and paper workspaces.
 struct DeskTab: View {
     let title: String
+    var symbol: String? = nil
     let selected: Bool
     let action: () -> Void
     @State private var hovered = false
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 11, weight: selected ? .bold : .medium, design: .monospaced))
-                .foregroundStyle(selected ? Color.black : hovered ? DeskStyle.accent.opacity(0.85) : DeskStyle.muted)
-                .padding(.horizontal, 13).frame(height: 33)
-                .background(DeskStyle.highlight.opacity(selected ? 1 : hovered ? 0.25 : 0), in: RoundedRectangle(cornerRadius: 2))
-                .overlay(alignment: .bottom) {
-                    if selected { Rectangle().fill(DeskStyle.accent).frame(height: 2).padding(.horizontal, 13) }
-                }
-                .contentShape(Rectangle())
+            HStack(spacing: 7) {
+                Text(title).font(.system(size: 12, weight: .regular))
+            }
+            .foregroundStyle(selected ? DeskStyle.accent : DeskStyle.muted)
+            .padding(.horizontal, 14).frame(height: 35)
+            .background(selected ? DeskStyle.background : hovered ? DeskStyle.raised.opacity(0.6) : .clear,
+                        in: UnevenRoundedRectangle(topLeadingRadius: 7, topTrailingRadius: 7))
+            .overlay(alignment: .top) {
+                if selected { Capsule().fill(DeskStyle.highlight).frame(height: 2).padding(.horizontal, 7) }
+            }
+            .overlay(alignment: .trailing) { Rectangle().fill(DeskStyle.edge).frame(width: 0.5).padding(.vertical, 10) }
+            .contentShape(Rectangle())
         }.buttonStyle(.plain)
             .onHover { hovered = $0 }
             .animation(.easeOut(duration: 0.12), value: hovered)
@@ -135,8 +163,8 @@ struct DeskFieldStyle: TextFieldStyle {
         configuration.textFieldStyle(.plain)
             .font(.system(size: 12))
             .padding(.horizontal, 10).frame(height: 32)
-            .background(DeskStyle.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 2))
-            .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+            .background(DeskStyle.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
     }
 }
 
@@ -151,9 +179,9 @@ struct DeskMenuLabel: View {
         }
         .font(.system(size: 12)).foregroundStyle(DeskStyle.accent)
         .padding(.horizontal, 10).frame(height: 30)
-        .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 2))
-        .overlay { RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
-        .contentShape(RoundedRectangle(cornerRadius: 2))
+        .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
+        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+        .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -293,7 +321,7 @@ enum AgentLocator {
             terminal.getTerminal().changeHistorySize(20_000)
             terminal.alternateScreenScrollsByPage = true
         }
-        terminal.nativeForegroundColor = .white
+        terminal.nativeForegroundColor = NSColor(white: 0.80, alpha: 1)
         terminal.nativeBackgroundColor = DeskStyle.terminalBackground
         terminal.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     }
@@ -967,45 +995,32 @@ enum Command {
                     HStack {
                         HStack(spacing: 10) {
                             DeskMark(size: 23)
-                            Text("RESEARCH DESK").font(.system(size: 14, weight: .black, design: .monospaced)).tracking(-0.5)
+                            Text("Research Desk").font(.system(size: 14, weight: .semibold))
                         }.foregroundStyle(DeskStyle.accent)
                         Spacer()
                         DeskSidebarToggle()
                     }.foregroundStyle(DeskStyle.muted)
-                        .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
-                    Button { model.selectPaperWorkspace() } label: {
-                        HStack(spacing: 11) {
-                            Image(systemName: "book.closed")
-                                .font(.system(size: 14)).foregroundStyle(DeskStyle.accent).frame(width: 19)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("PaperDaily").font(.system(size: 12, weight: .medium))
-                                
-                            }
-                            Spacer()
-                            if model.paperAgent?.ended == false {
-                                Circle().fill(DeskStyle.running).frame(width: 5, height: 5)
-                            }
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background { if model.paperSelected { DeskMetalPlate() } }
-                    }.buttonStyle(.plain).padding(.horizontal, 12).padding(.bottom, 20)
-                    HStack {
-                        DeskEyebrow(title: "Workspaces")
+                        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 26)
+                    HStack(spacing: 7) {
+                        Text("Workspaces").font(.system(size: 12, weight: .medium))
+                        Text("\(model.projects.count)")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Color.white.opacity(0.055), in: Capsule())
                         Spacer()
-                        Text("\(model.projects.count)").font(.caption2).foregroundStyle(DeskStyle.muted)
-                    }.padding(.horizontal, 18).padding(.bottom, 10)
+                    }.foregroundStyle(DeskStyle.muted.opacity(0.85))
+                        .padding(.horizontal, 24).padding(.bottom, 12)
                     ScrollView {
-                        LazyVStack(spacing: 2) {
+                        LazyVStack(spacing: 5) {
                             ForEach(model.projects) { project in
                                 Button { model.select(project) } label: {
                                     HStack(spacing: 11) {
-                                        Image(systemName: project.isRemote ? "server.rack" : "folder")
+                                        Image(systemName: project.isRemote ? "network" : "folder.fill")
                                             .font(.system(size: 14))
                                             .foregroundStyle(model.selected == project.id && !model.paperSelected ? DeskStyle.accent : DeskStyle.muted)
                                             .frame(width: 19)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(project.name).font(.system(size: 12, weight: model.selected == project.id && !model.paperSelected ? .medium : .regular)).lineLimit(1)
+                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected ? .medium : .regular)).lineLimit(1)
                                             if project.isRemote {
                                                 Text(project.host).font(.system(size: 10)).foregroundStyle(DeskStyle.muted).lineLimit(1)
                                             }
@@ -1015,16 +1030,9 @@ enum Command {
                                     }
                                     .padding(.horizontal, 12).padding(.vertical, 9)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background {
-                                        if model.selected == project.id && !model.paperSelected {
-                                            DeskMetalPlate()
-                                                .overlay(alignment: .leading) {
-                                                    Rectangle().fill(DeskStyle.accent).frame(width: 2, height: 20).padding(.leading, 1)
-                                                }
-                                        }
-                                    }
+                                    .contentShape(RoundedRectangle(cornerRadius: 9))
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected))
                                 .contextMenu {
                                     Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
                                     Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
@@ -1039,15 +1047,37 @@ enum Command {
                         DeskErrorBanner(message: model.storageError, title: "Could not save workspace")
                             .padding(.horizontal, 10).padding(.bottom, 8)
                     }
-                    Button { showUsage = true } label: { Label("Settings · Claude usage", systemImage: "gearshape") }
-                        .buttonStyle(DeskButtonStyle()).padding(.top, 12)
-                        .sheet(isPresented: $showUsage) { ClaudeUsagePane() }
-                    HStack(spacing: 8) {
-                        Button { model.addLocal() } label: { Label("Local folder", systemImage: "plus") }
-                        Button { model.prepareRemote() } label: { Label("SSH", systemImage: "network") }
-                    }.buttonStyle(DeskButtonStyle()).controlSize(.small).padding(.horizontal, 16).padding(.vertical, 16)
+                    HStack {
+                        Menu {
+                            Button("PaperDaily", systemImage: "book.closed") { model.selectPaperWorkspace() }
+                            Divider()
+                            Button("Usage & settings…", systemImage: "chart.bar") { showUsage = true }
+                            Divider()
+                            Button("Open local folder…", systemImage: "folder.badge.plus") { model.addLocal() }
+                            Button("New SSH connection…", systemImage: "network") { model.prepareRemote() }
+                        } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: "gearshape").font(.system(size: 13))
+                                Text("Settings").font(.system(size: 12))
+                                Spacer()
+                                Image(systemName: "ellipsis").font(.system(size: 12))
+                            }
+                            .foregroundStyle(DeskStyle.muted)
+                            .padding(.horizontal, 12).frame(height: 34)
+                            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+                        }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).tint(DeskStyle.muted)
+                        .foregroundStyle(DeskStyle.muted).help("Settings, connections & PaperDaily")
+                        Spacer()
+                    }.padding(.horizontal, 18).padding(.vertical, 12)
+                    .sheet(isPresented: $showUsage) { ClaudeUsagePane() }
                 }
-                .background { DeskMetalSurface() }
+                .background { DeskVibrancy().overlay(DeskStyle.sidebar.opacity(0.72)) }
+                .overlay(alignment: .trailing) {
+                    LinearGradient(colors: [.clear, Color.black.opacity(0.12)], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 8).allowsHitTesting(false)
+                    Rectangle().fill(Color.white.opacity(0.035)).frame(width: 1).allowsHitTesting(false)
+                }
                 .navigationSplitViewColumnWidth(min: 220, ideal: 238)
                 .navigationTitle("")
             } detail: {
@@ -1081,7 +1111,7 @@ enum Command {
             .buttonStyle(DeskButtonStyle())
             .frame(minWidth: 1000, minHeight: 680)
             .preferredColorScheme(.dark)
-            .tint(DeskStyle.accent)
+            .tint(DeskStyle.highlight)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 model.shutdown()
             }
@@ -1166,32 +1196,15 @@ struct ProjectDetail: View {
     let project: Project
     let snapshot: Snapshot
     @ObservedObject var model: DeskModel
-    private var tab: Int { model.projectTabs[project.id] ?? 0 }
+    private var tab: Int { model.projectTabs[project.id].flatMap { $0 == 0 ? 1 : $0 } ?? 1 }
     @State private var favoritesOnly = false
     @State private var agentFilter = "all"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text(project.name).font(.system(size: 23, weight: .bold, design: .monospaced)).tracking(-0.6)
-                        Button { model.prepareRename(project) } label: {
-                            Image(systemName: "pencil").font(.system(size: 11))
-                        }.buttonStyle(DeskButtonStyle(compact: true)).help("Rename project")
-                    }
-                    Text(project.isRemote ? "\(project.host):\(project.path)" : project.path)
-                        .font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                }
-                Spacer()
-                Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(DeskButtonStyle()).help("Refresh project status").disabled(model.busy)
-            }.padding(.horizontal, 26).padding(.top, 18).padding(.bottom, 14)
             ScrollView(.horizontal) {
-              HStack(spacing: 2) {
+              HStack(spacing: 0) {
                 if sidebarHidden { DeskSidebarToggle().padding(.trailing, 6) }
-                tabButton("Files", "folder", 0)
                 tabButton("Agent console", "terminal", 1)
                 tabButton("Terminal", "greaterthan.square", 2)
                 tabButton("Notes", "note.text", 3)
@@ -1199,12 +1212,14 @@ struct ProjectDetail: View {
                 tabButton("Artifacts", "globe", 5)
                 tabButton("Overnight sessions", "moon.stars", 6)
                 Spacer()
+                Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(DeskButtonStyle(compact: true)).help("Refresh project status").disabled(model.busy)
               }
-            }.scrollIndicators(.hidden).padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 12)
+            }.scrollIndicators(.hidden).padding(.horizontal, 12).padding(.top, 4)
             Rectangle().fill(DeskStyle.edge).frame(height: 0.5)
             Group {
                 switch tab {
-                case 0: FilesPane(browser: model.fileBrowser(for: project))
+                case 0: agent
                 case 1: agent
                 case 2: machineTerminal
                 case 4: PapersPane(project: project, model: model, library: model.papers, showAgent: { model.projectTabs[project.id] = 1 }, showTerminal: { model.projectTabs[project.id] = 2 })
@@ -1213,6 +1228,10 @@ struct ProjectDetail: View {
                 default: notesPane
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(DeskStyle.background)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(DeskStyle.edge, lineWidth: 1) }
+                .padding(.horizontal, 8).padding(.top, 6)
             statusBar
         }
         .background { DeskMetalSurface() }
@@ -1247,7 +1266,7 @@ struct ProjectDetail: View {
     }
 
     private func tabButton(_ title: String, _ symbol: String, _ index: Int) -> some View {
-        DeskTab(title: title, selected: tab == index) { model.projectTabs[project.id] = index }
+        DeskTab(title: title, symbol: symbol, selected: tab == index) { model.projectTabs[project.id] = index }
     }
 
     private var agent: some View {

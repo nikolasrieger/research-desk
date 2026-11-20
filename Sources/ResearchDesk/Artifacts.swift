@@ -137,18 +137,18 @@ struct ArtifactsPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Artifact URL or project HTML path", text: $input).textFieldStyle(DeskFieldStyle()).onSubmit { open() }
+                TextField("Link or HTML path", text: $input).textFieldStyle(DeskFieldStyle()).onSubmit { open() }
                 Button("Open") { open() }.disabled(input.isEmpty)
-                Button("Choose HTML…") { chooseHTML() }
-                Button("Latest in chat") { discover() }.disabled(session?.agent != "claude" || loading)
+                Button("Choose file…") { chooseHTML() }
+                Button("From chat") { discover() }.disabled(session?.agent != "claude" || loading)
                 if loading { ProgressView().controlSize(.small) }
             }.padding(12).background { DeskMetalSurface() }
             if let url {
                 HStack {
-                    Text(url.isFileURL ? (htmlFile == nil ? "HTML preview" : "Remote HTML preview") : "Sign in to Claude here if the artifact is private.").font(.caption).foregroundStyle(DeskStyle.muted)
+                    Text(url.isFileURL ? (htmlFile == nil ? "HTML preview" : "Remote HTML preview") : "Claude artifact").font(.caption).foregroundStyle(DeskStyle.muted)
                     Spacer()
                     Button("Reload") { if htmlFile != nil { openHTML(htmlSource, force: true) } else { reload += 1 } }
-                    Button("Open in browser ↗") { NSWorkspace.shared.open(url) }
+                    Button("Open in browser") { NSWorkspace.shared.open(url) }
                 }.padding(.horizontal, 12).padding(.vertical, 5)
             }
             if !error.isEmpty { DeskErrorBanner(message: error, title: "Could not open artifact", onDismiss: { error = "" }).padding(12) }
@@ -158,10 +158,8 @@ struct ArtifactsPane: View {
             } else {
                 VStack(spacing: 8) {
                     Text("Artifacts").font(.system(size: 15, weight: .medium))
-                    Text("Open an HTML file from your Mac, enter a project HTML path, or paste a Claude artifact URL.")
-                        .font(.callout).foregroundStyle(DeskStyle.muted).multilineTextAlignment(.center)
-                    Text("In Claude Code, /artifacts lists your artifacts and lets you copy a link.")
-                        .font(.caption).foregroundStyle(DeskStyle.muted)
+                    Text("Open an HTML file or paste an artifact link.")
+                        .font(.system(size: 12)).foregroundStyle(DeskStyle.muted).multilineTextAlignment(.center)
                 }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.background(DeskStyle.background)

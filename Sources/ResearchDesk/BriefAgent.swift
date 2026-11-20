@@ -1117,8 +1117,13 @@ struct BriefAgentView: View {
                     }
                     composer
                 }.frame(minWidth: 240, idealWidth: 600, maxWidth: .infinity)
-                inspectorPane.frame(minWidth: 190, idealWidth: 300, maxWidth: .infinity)
-            }
+                    .background(DeskStyle.background)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(DeskStyle.edge, lineWidth: 1) }
+                inspectorPane.frame(minWidth: inspector == 1 ? 390 : 190, idealWidth: inspector == 1 ? 440 : 300, maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(DeskStyle.edge, lineWidth: 1) }
+            }.padding(8)
         }
         .background(DeskStyle.background)
         .task { session.refreshChanges(); model.refreshHistory(session.project) }
@@ -1299,25 +1304,41 @@ struct BriefAgentView: View {
 
     private var inspectorPane: some View {
         VStack(spacing: 14) {
-            HStack(spacing: 6) {
-                Button("Progress") { inspector = 0 }.buttonStyle(DeskButtonStyle(prominent: inspector == 0))
-                Button("Changes (\(session.changes.count))") { inspector = 1 }.buttonStyle(DeskButtonStyle(prominent: inspector == 1))
+            HStack(spacing: 0) {
+                DeskTab(title: "Progress", symbol: "waveform.path", selected: inspector == 0) { inspector = 0 }
+                DeskTab(title: "Files", selected: inspector == 1) { inspector = 1 }
                 if previewPath != nil {
-                    Button("File") { inspector = 2 }.buttonStyle(DeskButtonStyle(prominent: inspector == 2))
+                    DeskTab(title: "Preview", symbol: "doc", selected: inspector == 2) { inspector = 2 }
                     Button { previewPath = nil; if inspector == 2 { inspector = 0 } } label: { Image(systemName: "xmark") }.buttonStyle(DeskButtonStyle(compact: true))
                 }
                 Spacer(minLength: 0)
             }
             if inspector == 2, let previewPath {
                 AgentFilePreview(project: session.project, path: previewPath, openLink: { openFileLink($0) }).id(previewPath)
+            } else if inspector == 0 && !session.running && session.error.isEmpty && session.permissions.isEmpty && session.codexQuestions.isEmpty && session.pastActions.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 19, weight: .light)).foregroundStyle(DeskStyle.muted)
+                        .frame(width: 42, height: 42)
+                        .background(Color.white.opacity(0.035), in: Circle())
+                    Text(session.status).font(.system(size: 12)).foregroundStyle(DeskStyle.muted)
+                        .multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if inspector == 0 {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        HStack(alignment: .top) {
+                        HStack(alignment: .center, spacing: 10) {
+                            if session.running { ProgressView().controlSize(.small).scaleEffect(0.75) }
+                            else { Circle().fill(session.error.isEmpty ? DeskStyle.running : .orange).frame(width: 6, height: 6) }
                             Text(!session.error.isEmpty && session.status == session.error ? "Request needs attention" : session.status).font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 2)
-                            if session.running { Button("Stop") { session.stop() }.buttonStyle(DeskButtonStyle(compact: true)) }
-                        }
+                            if session.running {
+                                Button { session.stop() } label: { Image(systemName: "stop.fill").font(.system(size: 9)) }
+                                    .buttonStyle(DeskButtonStyle(compact: true)).help("Stop request")
+                            }
+                        }.padding(12)
+                            .background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
                         ForEach($session.codexQuestions) { $question in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(question.prompt).font(.system(size: 12, weight: .medium))
@@ -1344,7 +1365,10 @@ struct BriefAgentView: View {
                             DisclosureGroup("Past actions (\(session.pastActions.count))", isExpanded: $historyExpanded) {
                                 VStack(alignment: .leading, spacing: 12) {
                                     ForEach(Array(session.pastActions.enumerated()), id: \.offset) { _, text in
-                                        Text(text).font(.system(size: 11)).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
+                                        HStack(alignment: .top, spacing: 9) {
+                                            Circle().fill(DeskStyle.muted.opacity(0.35)).frame(width: 4, height: 4).padding(.top, 5)
+                                            Text(text).font(.system(size: 11)).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
+                                        }
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
                             }.font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
@@ -1352,35 +1376,9 @@ struct BriefAgentView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                if !session.changesError.isEmpty { DeskErrorBanner(message: session.changesError, title: "Could not load changes", onDismiss: { session.changesError = "" }) }
-                HStack {
-                    Text("Working tree + staged").font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
-                    Spacer()
-                    Button { session.refreshChanges() } label: { Image(systemName: "arrow.clockwise") }.disabled(session.loadingChanges)
-                }.buttonStyle(DeskButtonStyle(compact: true))
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(session.changes) { changed in
-                                Button {
-                                    fileID = changed.id
-                                    DispatchQueue.main.async {
-                                        withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo("brief-code-preview", anchor: .top) }
-                                    }
-                                } label: {
-                                    HStack { Text(changed.path).lineLimit(2); Spacer(); Text(changed.status).font(.caption.monospaced()) }
-                                }.buttonStyle(DeskButtonStyle(prominent: changed.id == file?.id))
-                            }
-                            if let file {
-                                codePreview(file).id("brief-code-preview")
-                            } else { Text("No Git changes.").foregroundStyle(DeskStyle.muted).font(.caption) }
-                        }
-                    }
-                }
-                Button("Attach selected lines (\(selected.count))") { attach() }.buttonStyle(DeskButtonStyle()).disabled(selected.isEmpty)
-                Text("Includes existing edits, up to 80 files. Large diffs are truncated. Changes are not necessarily made by this agent.").font(.system(size: 9)).foregroundStyle(DeskStyle.muted)
+                FilesPane(browser: model.fileBrowser(for: session.project))
             }
-        }.padding(16).background(DeskStyle.surface)
+        }.padding(10).background(DeskStyle.sidebar)
     }
     private func codePreview(_ file: BriefChangedFile) -> some View {
         VStack(alignment: .leading, spacing: 0) {

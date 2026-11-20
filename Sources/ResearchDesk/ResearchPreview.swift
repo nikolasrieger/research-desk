@@ -26,7 +26,7 @@ struct PDFDocumentView: NSViewRepresentable {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
-        view.backgroundColor = NSColor(white: 0.105, alpha: 1)
+        view.backgroundColor = DeskStyle.terminalBackground
         view.document = document
         return view
     }

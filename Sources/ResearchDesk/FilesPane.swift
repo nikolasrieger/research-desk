@@ -65,11 +65,31 @@ enum FileBrowserIO {
         let script = remotePathScript + "\n" + """
         import stat,shutil
         limit=int(sys.argv[3])
-        with open(p,'rb') as f:
-            info=os.fstat(f.fileno())
-            assert stat.S_ISREG(info.st_mode), 'Not a regular file'
-            assert limit<0 or info.st_size<=limit, 'Media preview is limited to 500 MB. Download the file to play it locally.'
-            shutil.copyfileobj(f,sys.stdout.buffer,1024*1024)
+        if not os.path.exists(p):
+            matches=[]
+            scanned=0
+            for directory,folders,files in os.walk(requested_root):
+                folders[:]=[name for name in folders if name not in ('.git','.venv','venv','node_modules','__pycache__')]
+                scanned+=1
+                if scanned>20000:
+                    sys.exit('File not found at '+requested_path+'. Project search limit reached; open it from Files.')
+                if os.path.basename(requested_path) in files:
+                    matches.append(os.path.join(directory,os.path.basename(requested_path)))
+                    if len(matches)>1:
+                        sys.exit('Several files match '+os.path.basename(requested_path)+'. Open the intended file from Files.')
+            if not matches:
+                sys.exit('File not found: '+requested_path+'. Refresh Files or check that the file still exists.')
+            p=matches[0]
+        try:
+            with open(p,'rb') as f:
+                info=os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    sys.exit('Not a regular file: '+requested_path)
+                if limit>=0 and info.st_size>limit:
+                    sys.exit('File is too large to preview. Download it from the Files context menu.')
+                shutil.copyfileobj(f,sys.stdout.buffer,1024*1024)
+        except OSError as error:
+            sys.exit('Could not read '+requested_path+': '+str(error))
         """
         let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " " + String(limit ?? -1)
         let process = Process()
@@ -414,10 +434,6 @@ struct FilesPane: View {
                                 }
                         }
                     }
-                }
-                if let path = browser.selectedPath {
-                    Button { browser.download(path: path) } label: { Label(browser.downloading ? "Downloading…" : "Download file", systemImage: "arrow.down.to.line") }
-                        .buttonStyle(DeskButtonStyle()).disabled(browser.downloading)
                 }
                 if !browser.downloadMessage.isEmpty {
                     Text(browser.downloadMessage).font(.caption).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
