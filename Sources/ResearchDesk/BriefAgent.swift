@@ -1211,6 +1211,10 @@ struct BriefAgentView: View {
             options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
         return min(180, max(28, ceil(bounds.height) + 12))
     }
+    private var canSendInstruction: Bool {
+        !(session.running || session.changingModel || session.reloading || session.loadingHistory || dictation.recording || dictation.busy || session.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.sessions[session.project.id]?.ended == false)
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !session.error.isEmpty {
@@ -1231,8 +1235,11 @@ struct BriefAgentView: View {
                         .buttonStyle(DeskButtonStyle(compact: true)).help("Cancel dictation").accessibilityLabel("Cancel dictation")
                 }
             }
-            TextEditor(text: $session.instruction).font(.system(size: 12)).scrollContentBackground(.hidden)
-                .focused($instructionFocused)
+            ChatInput(text: $session.instruction,
+                      focused: Binding(get: { instructionFocused }, set: { instructionFocused = $0 }),
+                      canSubmit: canSendInstruction, label: "Instruction to " + session.agentName,
+                      submit: { session.send() })
+                .help("Enter to send · Shift+Enter for a new line")
                 .frame(height: inputHeight).padding(6)
                 .background(GeometryReader { proxy in
                     Color.clear.onAppear { inputWidth = proxy.size.width }
@@ -1259,7 +1266,7 @@ struct BriefAgentView: View {
                 .help("Transcribe on this Mac and add to your draft without sending")
                 Button("Send instruction", systemImage: "arrow.up") { session.send() }
                     .buttonStyle(DeskButtonStyle(prominent: true))
-                    .disabled(session.running || session.changingModel || session.reloading || session.loadingHistory || dictation.recording || dictation.busy || session.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.sessions[session.project.id]?.ended == false)
+                    .disabled(!canSendInstruction)
                     .keyboardShortcut(.return, modifiers: .command)
             }
         }.padding(16).background { DeskMetalSurface() }
