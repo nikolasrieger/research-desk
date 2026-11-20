@@ -80,3 +80,20 @@ In the debug workspace sidebar, a green dot indicates an active request. A blue 
 The debug composer has a **Model** menu (shown as Default, Sonnet, Opus, Haiku, or the selected model name). Default leaves model selection to Claude Code. Before connecting, aliases are offered; the available model list is refreshed from Claude’s initialization response when provided. **Custom model…** accepts a full model ID for your configured provider. Choose between requests: an active connection uses the `set_model` control request and waits for confirmation; it does not reconnect. A rejected change leaves the prior selection in place and shows an error. Availability is determined by the CLI/account/provider.
 
 In **Files**, drag the divider to resize the folder list. Hover a file, folder, or preview title to see its full path (including the SSH host for remote files). A gray dot marks uncommitted staged, working-tree, or untracked changes; folders are marked when they contain changed files. Git markers refresh when loading a folder, reopening the Files tab, or using Refresh.
+
+### Codex in Agent console
+
+In **Agent console → Conversations**, choose **Codex** beside **New conversation**.
+The same response, progress, approval, file-context, and file-preview panels are
+available for Codex and Claude Code. Existing Codex conversations on the selected
+machine appear in the saved conversation list and can be resumed.
+
+Install and sign in to the Codex CLI on the machine where the project lives. For
+an SSH workspace, Research Desk starts `codex app-server` on that server; it does
+not copy the Mac's credentials to the server. Follow-up messages reuse the running
+app-server process. Available models are fetched from that process after connecting;
+Default and a custom model ID can be selected before the first message. The CLI's
+sandbox and approval configuration is preserved, with supported approval prompts
+shown in Progress. Reload reconnects to the saved thread on the next instruction.
+
+The usage settings and Overnight Sessions worker remain Claude-specific.

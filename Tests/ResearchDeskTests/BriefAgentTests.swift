@@ -180,7 +180,7 @@ print(json.dumps({'type':'result','result':'Finished'}), flush=True)
             data.append(10)
             try data.write(to: directory.appendingPathComponent(UUID().uuidString + ".jsonl"))
         }
-        let command = "CLAUDE_CONFIG_DIR=" + Command.shellQuote(folder.path) + " python3 -c " + Command.shellQuote(BriefConversationHistory.script)
+        let command = "CODEX_HOME=" + Command.shellQuote(folder.path + "/codex") + " CLAUDE_CONFIG_DIR=" + Command.shellQuote(folder.path) + " python3 -c " + Command.shellQuote(BriefConversationHistory.script)
         let output = Command.run("/bin/zsh", ["-c", command])
         XCTAssertEqual(output.2, 0, output.1)
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601

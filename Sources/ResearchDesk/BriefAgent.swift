@@ -13,17 +13,18 @@ final class BriefTransport: @unchecked Sendable {
     private let input = Pipe(), output = Pipe(), errors = Pipe()
     private let writes = DispatchQueue(label: "researchdesk.brief.stdin")
 
-    func run(project: Project, executable: String?, sessionID: String, resume: Bool, model: String = "") throws -> AsyncStream<Event> {
+    func run(project: Project, executable: String?, sessionID: String, resume: Bool, model: String = "", agent: String = "claude") throws -> AsyncStream<Event> {
         var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                     "--permission-prompt-tool", "stdio", "--permission-mode", "auto", resume ? "--resume" : "--session-id", sessionID]
         if !model.isEmpty { args += ["--model", model] }
+        if agent == "codex" { args = ["app-server"] }
         if project.isRemote {
-            let command = (["claude"] + args).map(Command.shellQuote).joined(separator: " ")
+            let command = ([agent] + args).map(Command.shellQuote).joined(separator: " ")
             let remote = "cd " + Command.shellQuote(project.path) + " && exec \"${SHELL:-/bin/bash}\" -lic " + Command.shellQuote(command)
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", project.host, remote]
         } else {
-            guard let executable else { throw ResearchError.message("Claude Code was not found on this Mac. Install the CLI and sign in before sending an instruction.") }
+            guard let executable else { throw ResearchError.message("\(agent.capitalized) was not found on this Mac. Install the CLI and sign in before sending an instruction.") }
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = args
             process.currentDirectoryURL = URL(fileURLWithPath: project.path)
@@ -200,8 +201,8 @@ struct BriefAttachment: Identifiable {
         }
     }
     func chats(for project: Project) -> [BriefAgentModel] { conversations[project.id] ?? [] }
-    func create(for project: Project, workingProject: Project? = nil) -> BriefAgentModel {
-        let model = BriefAgentModel(project: workingProject ?? project)
+    func create(for project: Project, workingProject: Project? = nil, agent: String = "claude") -> BriefAgentModel {
+        let model = BriefAgentModel(project: workingProject ?? project, agent: agent)
         track(model, project: project)
         conversations[project.id, default: []].append(model)
         return model
@@ -210,7 +211,8 @@ struct BriefAttachment: Identifiable {
     func remember(_ chat: BriefAgentModel, for project: Project) {
         let key = selectionKey(project)
         lastOpened[key] = chat.id
-        let saved = SavedAgentSession(agent: "claude", id: chat.sessionID, modified: Date(), workspace: chat.project.path, name: chat.title)
+        guard chat.agent != "codex" || chat.hasStoredSession else { return }
+        let saved = SavedAgentSession(agent: chat.agent, id: chat.sessionID, modified: Date(), workspace: chat.project.path, name: chat.title)
         if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: key) }
     }
     func restore(for project: Project) -> BriefAgentModel? {
@@ -233,13 +235,13 @@ struct BriefAttachment: Identifiable {
         }
     }
     func open(_ saved: SavedAgentSession, project: Project) -> BriefAgentModel {
-        if let existing = chats(for: project).first(where: { $0.sessionID == saved.id }) { return existing }
+        if let existing = chats(for: project).first(where: { $0.sessionID == saved.id && $0.agent == saved.agent }) { return existing }
         var workingProject = project
         if let path = saved.workspace, path.hasPrefix("/"), path != project.path {
             workingProject.path = path
             workingProject.name = URL(fileURLWithPath: path).lastPathComponent
         }
-        let model = BriefAgentModel(project: workingProject)
+        let model = BriefAgentModel(project: workingProject, agent: saved.agent)
         track(model, project: project)
         conversations[project.id, default: []].append(model)
         model.useSession(saved)
@@ -249,6 +251,11 @@ struct BriefAttachment: Identifiable {
 
 @MainActor final class BriefAgentModel: ObservableObject {
     let project: Project
+    let agent: String
+    var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
+    private var codex = CodexSessionState()
+    private var codexApprovalIDs: [String: Any] = [:]
+    @Published var codexQuestions: [CodexQuestion] = []
     private let executableOverride: String?
     let id = UUID()
     @Published var title = "New conversation"
@@ -292,15 +299,18 @@ struct BriefAttachment: Identifiable {
     private var queuedPrompt: String?
     private let initializationID = "brief-initialize"
 
-    init(project: Project, executableOverride: String? = nil) {
+    init(project: Project, executableOverride: String? = nil, agent: String = "claude") {
+        self.agent = agent
         self.project = project
         self.executableOverride = executableOverride
+        if agent == "codex" { modelOptions = [BriefModelOption(id: "", name: "Default")] }
     }
+    var hasStoredSession: Bool { resume }
     var canContinue: Bool { resume && interrupted && !running && !loadingHistory && !changingModel }
     var current: BriefReply? { replies.indices.contains(index) ? replies[index] : nil }
 
     func useSession(_ saved: SavedAgentSession) {
-        guard !running, !loadingHistory, saved.agent == "claude", UUID(uuidString: saved.id) != nil else { return }
+        guard !running, !loadingHistory, saved.agent == agent, (agent == "codex" ? saved.id.range(of: #"^[A-Za-z0-9_-]{1,255}$"#, options: .regularExpression) != nil : UUID(uuidString: saved.id) != nil) else { return }
         let previous = transport; transport = nil; previous?.stop()
         sessionID = saved.id; resume = true; title = saved.title; error = ""; interrupted = false
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
@@ -313,7 +323,7 @@ struct BriefAttachment: Identifiable {
         loadingHistory = true
         let project = project
         Task {
-            let result = await Task.detached { BriefHistory.read(project, id: saved.id) }.value
+            let result = await Task.detached { BriefHistory.read(project, id: saved.id, agent: saved.agent) }.value
             loadingHistory = false
             switch result {
             case .success(let records):
@@ -349,25 +359,39 @@ struct BriefAttachment: Identifiable {
         error = ""; permissions = []; progress = []; seenToolIDs.removeAll(); running = true; receivedResult = false; resultFailed = false; finalResponse = BriefFinalResponse()
         if title == "New conversation" { title = String(text.prefix(90)) }
         interrupted = false
-        pendingInstruction = text; pendingAttachments = attachments; status = project.isRemote ? "Connecting to \(project.host)…" : "Starting Claude Code…"
+        pendingInstruction = text; pendingAttachments = attachments; status = project.isRemote ? "Connecting to \(project.host)…" : "Starting " + agentName + "…"
         if let connection = transport {
             guard connection.process.isRunning else {
                 running = false
                 status = "Connection is closing; try again in a moment"
                 return
             }
-            status = "Claude is working…"
-            connection.send(["type": "user", "message": ["role": "user", "content": prompt]])
+            status = agentName + " is working…"
+            if agent == "codex" { sendCodexTurn(prompt) }
+            else { connection.send(["type": "user", "message": ["role": "user", "content": prompt]]) }
             instruction = ""; attachments.removeAll()
             return
         }
         let connection = BriefTransport()
         do {
-            let events = try connection.run(project: project, executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable("claude")), sessionID: sessionID, resume: resume, model: selectedModel)
+            let events = try connection.run(project: project, executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable(agent)), sessionID: sessionID, resume: resume, model: selectedModel, agent: agent)
             transport = connection
             queuedPrompt = prompt
-            connection.send(["type": "control_request", "request_id": initializationID,
-                             "request": ["subtype": "initialize"]])
+            if agent == "codex" {
+                Task { [weak self, weak connection] in
+                    try? await Task.sleep(for: .seconds(30))
+                    guard let self, let connection, self.transport === connection, self.queuedPrompt != nil else { return }
+                    self.codexFailed("Codex did not finish connecting within 30 seconds. Check the CLI sign-in on this machine and retry.")
+                    connection.stop()
+                }
+            }
+            if agent == "codex" {
+                codex = CodexSessionState()
+                connection.send(CodexSessionState.initialize)
+            } else {
+                connection.send(["type": "control_request", "request_id": initializationID,
+                                 "request": ["subtype": "initialize"]])
+            }
             instruction = ""; attachments.removeAll()
             Task { [self] in
                 for await event in events {
@@ -375,7 +399,8 @@ struct BriefAttachment: Identifiable {
                     switch event {
                     case .decoded(let event):
                         consumingTransport = true
-                        consume(event.value)
+                        if agent == "codex" { consumeCodex(event.value) }
+                        else { consume(event.value) }
                         consumingTransport = false
                         if ["result", "control_request"].contains(event.value["type"] as? String ?? "") { flushProgress() }
                     case .stderr(let text): error = String((error + text).suffix(16_000))
@@ -383,12 +408,12 @@ struct BriefAttachment: Identifiable {
                         flushProgress()
                         if running {
                             if !receivedResult {
-                                if error.isEmpty { error = "Claude exited without a final response (exit \(code)). You can send another instruction to resume." }
+                                if error.isEmpty { error = "\(agentName) exited without a final response (exit \(code)). You can send another instruction to resume." }
                                 if instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
                             }
                             interrupted = !receivedResult || resultFailed
                         }
-                        running = false; permissions.removeAll(); transport = nil
+                        running = false; permissions.removeAll(); codexQuestions = []; codexApprovalIDs = [:]; transport = nil
                         if changingModel { error = "Connection ended while changing the model." }
                         changingModel = false; pendingModelChange = nil
                         status = interrupted ? (error.isEmpty ? "Connection ended before completion" : error) : "Disconnected · reconnects on the next instruction"
@@ -396,7 +421,7 @@ struct BriefAttachment: Identifiable {
                     }
                 }
             }
-        } catch { running = false; self.error = error.localizedDescription; status = "Could not start Claude" }
+        } catch { running = false; self.error = error.localizedDescription; status = "Could not start " + agentName }
     }
     static func validModel(_ model: String) -> Bool {
         model.isEmpty || (model.utf8.count <= 256 && model.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$"#, options: .regularExpression) != nil)
@@ -406,6 +431,7 @@ struct BriefAttachment: Identifiable {
         guard !running, !loadingHistory, !reloading, !changingModel else { return }
         guard Self.validModel(model) else { error = "Enter a model alias or ID without spaces or control characters."; return }
         guard model != selectedModel else { return }
+        if agent == "codex" { selectedModel = model; return }
         guard let transport, transport.process.isRunning else { selectedModel = model; return }
         let id = UUID().uuidString
         pendingModelChange = (id, model)
@@ -445,8 +471,8 @@ struct BriefAttachment: Identifiable {
             guard transport == nil else { error = "The old connection is still closing. Try Reload again."; reloading = false; return }
             guard resume else { reloading = false; refreshChanges(); return }
             loadingHistory = true
-            let project = project, id = sessionID
-            let result = await Task.detached { BriefHistory.read(project, id: id) }.value
+            let project = project, id = sessionID, agent = agent
+            let result = await Task.detached { BriefHistory.read(project, id: id, agent: agent) }.value
             switch result {
             case .success(let records):
                 contextUsage.tokens = records.last?.contextTokens
@@ -630,6 +656,16 @@ struct BriefAttachment: Identifiable {
     }
 
     func answer(_ permission: BriefPermission, allow: Bool) {
+        if agent == "codex", let id = codexApprovalIDs.removeValue(forKey: permission.id) {
+            let method = permission.input["_codexMethod"] as? String ?? ""
+            let result: [String: Any] = method == "item/permissions/requestApproval"
+                ? ["permissions": allow ? (permission.input["permissions"] as? [String: Any] ?? [:]) : [:], "scope": "turn"]
+                : ["decision": allow ? "accept" : "decline"]
+            transport?.send(["id": id, "result": result])
+            permissions.removeAll { $0.id == permission.id }
+            status = "Codex is working…"
+            return
+        }
         let reply: [String: Any] = allow ? ["behavior": "allow", "updatedInput": permission.input] : ["behavior": "deny", "message": "The user declined this tool action."]
         transport?.send(["type": "control_response", "response": ["subtype": "success", "request_id": permission.id, "response": reply]])
         permissions.removeAll { $0.id == permission.id }; status = "Claude is working…"
@@ -712,7 +748,7 @@ enum BriefConversationHistory {
     static func read(_ project: Project) -> Result<[SavedAgentSession], Error> {
         let command = "python3 -c " + Command.shellQuote(script)
         let output = project.isRemote ? Command.ssh(project.host, command, maxOutput: 8_000_000) : Command.run("/bin/zsh", ["-c", command], timeout: 45, maxOutput: 8_000_000)
-        guard output.2 == 0 else { return .failure(ResearchError.message("Could not load Claude conversations. " + output.1)) }
+        guard output.2 == 0 else { return .failure(ResearchError.message("Could not load conversations. " + output.1)) }
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -761,13 +797,13 @@ for folder in glob.glob(os.path.join(root, '*')):
             item = dict(agent='claude', id=sid, modified=stamp, workspace=cwd or os.path.basename(folder), name=str(title or first_prompt or '')[:180] or None)
             if sid not in found or found[sid]['modified'] < stamp: found[sid] = item
         except OSError: continue
-print(json.dumps(sorted(found.values(), key=lambda x: x['modified'], reverse=True)))
-"""#
+"""# + "\n" + CodexHistory.discovery + "\nprint(json.dumps(sorted(found.values(), key=lambda x: x['modified'], reverse=True)))"
 }
 
 enum BriefHistory {
     struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int? }
-    static func read(_ project: Project, id: String) -> Result<[Record], Error> {
+    static func read(_ project: Project, id: String, agent: String = "claude") -> Result<[Record], Error> {
+        if agent == "codex" { return CodexHistory.read(project, id: id) }
         guard UUID(uuidString: id) != nil else { return .failure(ResearchError.message("Invalid saved session ID.")) }
         let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(id)
         let output = project.isRemote ? Command.ssh(project.host, command, maxOutput: 2_000_000) : Command.run("/bin/zsh", ["-c", command], maxOutput: 2_000_000)
@@ -890,6 +926,7 @@ struct BriefAgentPane: View {
     @State private var search = ""
     @State private var currentWorkspaceOnly = false
     @State private var restoredSelection = false
+    @State private var newAgent = "claude"
     private func matches(_ chat: SavedAgentSession) -> Bool {
         (!currentWorkspaceOnly || chat.belongs(to: project)) && (search.isEmpty || (chat.title + " " + (chat.workspace ?? "") + " " + chat.id).localizedCaseInsensitiveContains(search))
     }
@@ -900,9 +937,9 @@ struct BriefAgentPane: View {
                     self.selected = nil
                     store.discover(project)
                 }, startNewChat: {
-                    let fresh = store.create(for: project, workingProject: selected.project)
+                    let fresh = store.create(for: project, workingProject: selected.project, agent: selected.agent)
                     fresh.chooseModel(selected.selectedModel)
-                    fresh.instruction = ChatContextUsage.handoff(from: selected.sessionID, project: selected.project, draft: selected.instruction)
+                    fresh.instruction = ChatContextUsage.handoff(from: selected.sessionID, project: selected.project, draft: selected.instruction, agent: selected.agent)
                     fresh.attachments = selected.attachments
                     store.remember(selected, for: project)
                     self.selected = fresh
@@ -916,6 +953,7 @@ struct BriefAgentPane: View {
             if !restoredSelection { restoredSelection = true; selected = store.restore(for: project) }
         }
         .onChange(of: selected?.id) { _, _ in if let selected { store.remember(selected, for: project) } }
+        .onChange(of: selected?.sessionID) { _, _ in if let selected { store.remember(selected, for: project) } }
     }
     private var overview: some View {
         ScrollView {
@@ -927,7 +965,8 @@ struct BriefAgentPane: View {
                     }
                     Spacer()
                     Button("Refresh", systemImage: "arrow.clockwise") { store.discover(project) }.disabled(store.loadingHosts.contains(project.host))
-                    Button("New conversation", systemImage: "plus") { selected = store.create(for: project) }
+                    DeskChoiceMenu(title: newAgent == "codex" ? "Codex" : "Claude Code", choices: ["Claude Code", "Codex"], selection: newAgent == "codex" ? "Codex" : "Claude Code") { newAgent = $0 == "Codex" ? "codex" : "claude" }
+                    Button("New conversation", systemImage: "plus") { selected = store.create(for: project, agent: newAgent) }
                         .buttonStyle(DeskButtonStyle(prominent: true))
                 }.buttonStyle(DeskButtonStyle())
                 HStack {
@@ -935,7 +974,7 @@ struct BriefAgentPane: View {
                     Toggle("This workspace only", isOn: $currentWorkspaceOnly).toggleStyle(.checkbox).font(.caption)
                 }
                 let allSaved = store.savedChats[project.host] ?? []
-                Text("Claude Code · \(project.isRemote ? project.host : "This Mac") · \(allSaved.count) saved conversations")
+                Text("Claude Code & Codex · \(project.isRemote ? project.host : "This Mac") · \(allSaved.count) saved conversations")
                     .font(.caption).foregroundStyle(DeskStyle.muted)
                 if !store.discoveryError.isEmpty {
                     HStack(alignment: .top) {
@@ -963,7 +1002,7 @@ struct BriefAgentPane: View {
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(chat.title).font(.system(size: 12))
+                                    Text(chat.agent.capitalized + " · " + chat.title).font(.system(size: 12))
                                     Text(chat.modified.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(DeskStyle.muted)
                                     Text(chat.workspace ?? "Unknown working directory").font(.caption.monospaced()).foregroundStyle(DeskStyle.muted).lineLimit(1).truncationMode(.middle)
                                 }
@@ -990,7 +1029,7 @@ private struct BriefChatRow: View {
             HStack(spacing: 14) {
                 Circle().fill(chat.running ? DeskStyle.running : chat.hasUnreadReply ? Color.blue : DeskStyle.muted).frame(width: 5, height: 5)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(chat.title).font(.system(size: 12))
+                    Text(chat.agent.capitalized + " · " + chat.title).font(.system(size: 12))
                     Text(chat.interrupted ? "Interrupted · continue available" : chat.running ? chat.status : "\(chat.replies.count) final responses")
                         .font(.caption).foregroundStyle(DeskStyle.muted)
                 }
@@ -1053,7 +1092,7 @@ struct BriefAgentView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Button(action: goBack) { Label("Conversations", systemImage: "chevron.left") }
-                Text(session.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                Text(session.agentName + " · " + session.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
                     .help(session.project.path)
                 Spacer(minLength: 8)
                 Button("Continue conversation", systemImage: "play") { session.continueConversation() }
@@ -1073,7 +1112,7 @@ struct BriefAgentView: View {
                             .environment(\.openURL, OpenURLAction { openFileLink($0) })
                     } else {
                         VStack(alignment: .leading, spacing: 14) {
-                            Text(session.interrupted ? "This conversation was interrupted." : "Give Claude a direction.").font(.system(size: 24, weight: .light))
+                            Text(session.interrupted ? "This conversation was interrupted." : "Give " + session.agentName + " a direction.").font(.system(size: 24, weight: .light))
                             Text("Final responses appear here. Tool activity and approval requests stay in Progress. Use Continue to finish an interrupted request, or write a new instruction below.")
                                 .font(.system(size: 12)).foregroundStyle(DeskStyle.muted).lineSpacing(5)
                             if !session.sessionID.isEmpty { Text("Session \(session.sessionID.prefix(8))").font(.caption.monospaced()).foregroundStyle(DeskStyle.muted) }
@@ -1097,6 +1136,7 @@ struct BriefAgentView: View {
             if running { historyExpanded = false; dictation.cancel() }
         }
         .onChange(of: session.permissions.count) { _, count in if count > 0 { inspector = 0 } }
+        .onChange(of: session.codexQuestions.count) { _, count in if count > 0 { inspector = 0 } }
     }
 
     private var contextIndicator: some View {
@@ -1130,7 +1170,7 @@ struct BriefAgentView: View {
                 .buttonStyle(DeskButtonStyle(compact: true))
                 .disabled(session.running || session.loadingHistory || session.reloading || (session.replies.isEmpty && usage.tokens == nil))
         }.padding(.horizontal, 14).padding(.bottom, 10)
-            .help("Latest active context, including cached input and output. The bar uses Claude's reported context window when available; otherwise it measures toward the 150,000-token warning threshold. A new chat references this conversation.")
+            .help("Latest active context, including cached input and output. The bar uses the agent's reported context window when available; otherwise it measures toward the 150,000-token warning threshold. A new chat references this conversation.")
     }
 
     private func openFileLink(_ url: URL) -> OpenURLAction.Result {
@@ -1174,7 +1214,7 @@ struct BriefAgentView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !session.error.isEmpty {
-                DeskErrorBanner(message: session.error, title: "Claude needs attention", onDismiss: { session.dismissError() })
+                DeskErrorBanner(message: session.error, title: session.agentName + " needs attention", onDismiss: { session.dismissError() })
             }
             ForEach(session.attachments) { attachment in
                 HStack {
@@ -1200,7 +1240,7 @@ struct BriefAgentView: View {
                 })
                 .background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(DeskStyle.edge))
-                .accessibilityLabel("Instruction to Claude Code")
+                .accessibilityLabel("Instruction to " + session.agentName)
             HStack(spacing: 8) {
                 modelSelector
                 Spacer(minLength: 0)
@@ -1240,13 +1280,13 @@ struct BriefAgentView: View {
         }
         .menuStyle(.borderlessButton).fixedSize()
         .disabled(session.running || session.changingModel || session.loadingHistory || session.reloading)
-        .help(session.activeModel.isEmpty ? "Choose the Claude model for this conversation" : "Active model: " + session.activeModel)
+        .help(session.activeModel.isEmpty ? "Choose the " + session.agentName + " model for this conversation" : "Active model: " + session.activeModel)
         .popover(isPresented: $showCustomModel) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Claude model").font(.headline)
+                Text(session.agentName + " model").font(.headline)
                 TextField("Model alias or full model ID", text: $customModel).textFieldStyle(DeskFieldStyle()).frame(width: 300)
                     .onSubmit { session.chooseModel(customModel); showCustomModel = false }
-                Text("Use an ID supported by Claude Code on this machine or provider.").font(.caption).foregroundStyle(DeskStyle.muted)
+                Text("Use an ID supported by " + session.agentName + " on this machine or provider.").font(.caption).foregroundStyle(DeskStyle.muted)
                 HStack {
                     Button("Cancel") { showCustomModel = false }
                     Spacer()
@@ -1277,6 +1317,18 @@ struct BriefAgentView: View {
                             Text(!session.error.isEmpty && session.status == session.error ? "Request needs attention" : session.status).font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 2)
                             if session.running { Button("Stop") { session.stop() }.buttonStyle(DeskButtonStyle(compact: true)) }
+                        }
+                        ForEach($session.codexQuestions) { $question in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(question.prompt).font(.system(size: 12, weight: .medium))
+                                if !question.options.isEmpty { Text(question.options.joined(separator: " · ")).font(.caption).foregroundStyle(DeskStyle.muted) }
+                                if question.secret { SecureField("Your answer", text: $question.answer).textFieldStyle(DeskFieldStyle()) }
+                                else { TextField("Your answer", text: $question.answer).textFieldStyle(DeskFieldStyle()) }
+                            }
+                        }
+                        if !session.codexQuestions.isEmpty {
+                            Button("Send answers") { session.answerCodexQuestions() }.buttonStyle(DeskButtonStyle(prominent: true))
+                                .disabled(session.codexQuestions.contains { $0.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
                         }
                         ForEach(session.permissions) { permission in
                             VStack(alignment: .leading, spacing: 10) {
@@ -1326,7 +1378,7 @@ struct BriefAgentView: View {
                     }
                 }
                 Button("Attach selected lines (\(selected.count))") { attach() }.buttonStyle(DeskButtonStyle()).disabled(selected.isEmpty)
-                Text("Includes existing edits, up to 80 files. Large diffs are truncated. Changes are not necessarily made by Claude.").font(.system(size: 9)).foregroundStyle(DeskStyle.muted)
+                Text("Includes existing edits, up to 80 files. Large diffs are truncated. Changes are not necessarily made by this agent.").font(.system(size: 9)).foregroundStyle(DeskStyle.muted)
             }
         }.padding(16).background(DeskStyle.surface)
     }
@@ -1369,5 +1421,134 @@ struct BriefAgentView: View {
         let chosen = selected.sorted().filter { lines.indices.contains($0) }
         session.attachments.append(BriefAttachment(label: file.path + " · \(chosen.count) diff lines", text: chosen.map { lines[$0] }.joined(separator: "\n")))
         selected.removeAll()
+    }
+}
+
+// Codex app-server keeps a persistent process and thread across message turns.
+extension BriefAgentModel {
+    private func sendCodexTurn(_ prompt: String) {
+        codex.beginTurn(); codexQuestions = []; codexApprovalIDs = [:]
+        var params: [String: Any] = ["threadId": sessionID, "input": [["type": "text", "text": prompt]]]
+        if !selectedModel.isEmpty { params["model"] = selectedModel }
+        else if let model = codex.defaultModel { params["model"] = model }
+        transport?.send(CodexSessionState.request("turn/start", id: "rd-turn-" + UUID().uuidString, params: params))
+        status = "Codex is working…"
+    }
+    private func codexFailed(_ message: String) {
+        error = message; status = message; interrupted = true; resultFailed = true; running = false
+        if instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
+        queuedPrompt = nil; permissions = []; codexQuestions = []
+    }
+    func answerCodexQuestions() {
+        let groups = Dictionary(grouping: codexQuestions, by: \.requestKey)
+        for (key, questions) in groups {
+            guard let id = codexApprovalIDs.removeValue(forKey: key) else { continue }
+            let answers = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, ["answers": [$0.answer]]) })
+            transport?.send(["id": id, "result": ["answers": answers]])
+        }
+        codexQuestions = []; status = "Codex is working…"
+    }
+    func consumeCodex(_ event: [String: Any]) {
+        let method = event["method"] as? String
+        let params = event["params"] as? [String: Any] ?? [:]
+        if method == nil, let id = event["id"] as? String {
+            if let failure = event["error"] as? [String: Any] {
+                if id == "rd-models" { log("Codex model list unavailable; Default and custom models remain available"); return }
+                codexFailed(failure["message"] as? String ?? "Codex request failed.")
+                transport?.stop(); return
+            }
+            let result = event["result"] as? [String: Any] ?? [:]
+            if id == "rd-initialize" {
+                transport?.send(["method": "initialized"])
+                transport?.send(CodexSessionState.request("model/list", id: "rd-models", params: ["limit": 100]))
+                // Preserve the account's sandbox and approval configuration.
+                var settings: [String: Any] = ["cwd": project.path]
+                if !selectedModel.isEmpty { settings["model"] = selectedModel }
+                if resume { settings["threadId"] = sessionID; settings["excludeTurns"] = true }
+                transport?.send(CodexSessionState.request(resume ? "thread/resume" : "thread/start", id: "rd-thread", params: settings))
+            } else if id == "rd-models" {
+                var options = [BriefModelOption(id: "", name: "Default")]
+                for model in result["data"] as? [[String: Any]] ?? [] {
+                    guard let value = model["model"] as? String ?? model["id"] as? String, Self.validModel(value) else { continue }
+                    options.append(BriefModelOption(id: value, name: model["displayName"] as? String ?? value))
+                    if model["isDefault"] as? Bool == true { codex.defaultModel = value }
+                }
+                modelOptions = options
+            } else if id == "rd-thread" {
+                guard let thread = result["thread"] as? [String: Any], let id = thread["id"] as? String else { codexFailed("Codex did not return a thread ID."); transport?.stop(); return }
+                sessionID = id; resume = true; codex.threadReady = true
+                activeModel = result["model"] as? String ?? selectedModel
+                log("Connected to Codex")
+                if let prompt = queuedPrompt { queuedPrompt = nil; sendCodexTurn(prompt) }
+            } else if id.hasPrefix("rd-turn-"), let turn = result["turn"] as? [String: Any] { codex.turnID = turn["id"] as? String }
+            return
+        }
+        if let thread = params["threadId"] as? String, resume, thread != sessionID { return }
+        if let method, let id = event["id"] {
+            let key = String(describing: id)
+            codexApprovalIDs[key] = id
+            if ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].contains(method) {
+                var detail = params; detail["_codexMethod"] = method
+                permissions.append(BriefPermission(id: key, tool: method.contains("fileChange") ? "File changes" : method.contains("permissions") ? "Permissions" : "Command", input: detail))
+                status = "Waiting for approval"
+            } else if method == "item/tool/requestUserInput" {
+                for question in params["questions"] as? [[String: Any]] ?? [] {
+                    guard let id = question["id"] as? String else { continue }
+                    codexQuestions.append(CodexQuestion(id: id, requestKey: key, prompt: question["question"] as? String ?? id,
+                        options: (question["options"] as? [[String: Any]] ?? []).compactMap { $0["label"] as? String }, secret: question["isSecret"] as? Bool ?? false))
+                }
+                status = "Codex has a question"
+            } else {
+                transport?.send(["id": id, "error": ["code": -32601, "message": "Research Desk does not support this client request: " + method]])
+                codexApprovalIDs.removeValue(forKey: key)
+                log("Unsupported Codex request: " + method)
+            }
+            return
+        }
+        switch method {
+        case "turn/started":
+            codex.turnID = (params["turn"] as? [String: Any])?["id"] as? String
+        case "item/started", "item/completed":
+            guard let item = params["item"] as? [String: Any] else { return }
+            if method == "item/completed" { codex.observeItem(item) }
+            let type = item["type"] as? String ?? ""
+            if method == "item/started" {
+                if ["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall"].contains(type) {
+                    codex.fallbackAnswer = ""
+                    let detail = item["command"] as? String ?? item["tool"] as? String ?? item["query"] as? String ?? ""
+                    status = type + (detail.isEmpty ? "" : ": " + String(detail.prefix(130))); log(status)
+                } else if type == "reasoning" { status = "Codex is thinking…" }
+            }
+        case "thread/tokenUsage/updated":
+            if let usage = params["tokenUsage"] as? [String: Any] {
+                contextUsage.tokens = (usage["last"] as? [String: Any])?["totalTokens"] as? Int
+                contextUsage.limit = usage["modelContextWindow"] as? Int
+            }
+        case "turn/completed":
+            let turn = params["turn"] as? [String: Any] ?? [:]
+            for item in turn["items"] as? [[String: Any]] ?? [] { codex.observeItem(item) }
+            receivedResult = true; resume = true
+            if turn["status"] as? String == "completed" {
+                error = ""
+                let answer = codex.answer
+                if !answer.isEmpty {
+                    replies.append(BriefReply(instruction: pendingInstruction, markdown: answer)); index = replies.count - 1
+                    hasUnreadReply = true
+                } else { error = "Codex completed without a final text response. You can send a follow-up." }
+                interrupted = false; resultFailed = false; running = false; status = "Ready for your next instruction"
+            } else {
+                codexFailed((turn["error"] as? [String: Any])?["message"] as? String ?? "Codex was interrupted before completion.")
+            }
+            permissions = []; codexQuestions = []; codexApprovalIDs = [:]; flushProgress(); refreshChanges()
+        case "error":
+            let failure = params["error"] as? [String: Any] ?? [:]
+            error = failure["message"] as? String ?? params["message"] as? String ?? "Codex reported an error."
+            status = error
+        case "serverRequest/resolved":
+            let key = String(describing: params["requestId"] ?? "")
+            permissions.removeAll { $0.id == key }; codexQuestions.removeAll { $0.requestKey == key }; codexApprovalIDs.removeValue(forKey: key)
+        case "warning": log(params["message"] as? String ?? "Codex warning")
+        default: break
+        }
     }
 }
