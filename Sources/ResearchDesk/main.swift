@@ -642,6 +642,7 @@ enum Command {
     @Published var snapshots: [UUID: Snapshot] = [:]
     @Published var selected: UUID?
     @Published var paperSelected = false
+    @Published var ideasSelected = false
     @Published var storageError = ""
     @Published var busy = false
     @Published var showRemote = false
@@ -727,6 +728,7 @@ enum Command {
     }
 
     func selectPaperWorkspace() {
+        ideasSelected = false
         paperSelected = true
         saveSelection()
     }
@@ -890,6 +892,7 @@ enum Command {
     }
 
     func select(_ project: Project) {
+        ideasSelected = false
         selected = project.id
         paperSelected = false
         saveSelection()
@@ -1001,6 +1004,16 @@ enum Command {
                         DeskSidebarToggle()
                     }.foregroundStyle(DeskStyle.muted)
                         .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 26)
+                    Button { model.ideasSelected = true } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "square.and.pencil").font(.system(size: 15))
+                            Text("Research ideas").font(.system(size: 13, weight: .medium))
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 13).frame(height: 42)
+                    }.buttonStyle(DeskSidebarRowStyle(selected: model.ideasSelected))
+                        .background(DeskStyle.highlight.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                        .overlay { RoundedRectangle(cornerRadius: 11).strokeBorder(DeskStyle.highlight.opacity(0.18)) }
+                        .padding(.horizontal, 12).padding(.bottom, 22)
                     HStack(spacing: 7) {
                         Text("Workspaces").font(.system(size: 12, weight: .medium))
                         Text("\(model.projects.count)")
@@ -1017,10 +1030,10 @@ enum Command {
                                     HStack(spacing: 11) {
                                         Image(systemName: project.isRemote ? "network" : "folder.fill")
                                             .font(.system(size: 14))
-                                            .foregroundStyle(model.selected == project.id && !model.paperSelected ? DeskStyle.accent : DeskStyle.muted)
+                                            .foregroundStyle(model.selected == project.id && !model.paperSelected && !model.ideasSelected ? DeskStyle.accent : DeskStyle.muted)
                                             .frame(width: 19)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected ? .medium : .regular)).lineLimit(1)
+                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected && !model.ideasSelected ? .medium : .regular)).lineLimit(1)
                                             if project.isRemote {
                                                 Text(project.host).font(.system(size: 10)).foregroundStyle(DeskStyle.muted).lineLimit(1)
                                             }
@@ -1032,7 +1045,7 @@ enum Command {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .contentShape(RoundedRectangle(cornerRadius: 9))
                                 }
-                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected))
+                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected && !model.ideasSelected))
                                 .contextMenu {
                                     Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
                                     Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
@@ -1057,14 +1070,15 @@ enum Command {
                             Button("New SSH connection…", systemImage: "network") { model.prepareRemote() }
                         } label: {
                             HStack(spacing: 9) {
-                                Image(systemName: "gearshape").font(.system(size: 13))
-                                Text("Settings").font(.system(size: 12))
+                                Image(systemName: "gearshape").font(.system(size: 17, weight: .medium))
+                                Text("Settings").font(.system(size: 14, weight: .medium))
                                 Spacer()
                                 Image(systemName: "ellipsis").font(.system(size: 12))
                             }
                             .foregroundStyle(DeskStyle.muted)
-                            .padding(.horizontal, 12).frame(height: 34)
-                            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+                            .padding(.horizontal, 14).frame(height: 46)
+                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
                         }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).tint(DeskStyle.muted)
                         .foregroundStyle(DeskStyle.muted).help("Settings, connections & PaperDaily")
@@ -1081,7 +1095,9 @@ enum Command {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 238)
                 .navigationTitle("")
             } detail: {
-                if model.paperSelected {
+                if model.ideasSelected {
+                    ResearchIdeasPane(model: model)
+                } else if model.paperSelected {
                     PaperWorkspace(model: model)
                 } else if let project = model.current {
                     ProjectDetail(project: project, snapshot: model.snapshots[project.id] ?? Snapshot(), model: model)
@@ -1092,9 +1108,6 @@ enum Command {
                         DeskEyebrow(title: "Your research, connected")
                         Text("A space for your next idea.")
                             .font(.system(size: 32, weight: .light)).tracking(-1.2)
-                        Text("Open a local folder or connect to a machine over SSH.")
-                            .font(.subheadline).foregroundStyle(DeskStyle.muted)
-                            .multilineTextAlignment(.center).frame(maxWidth: 420)
                         HStack {
                             DeskSidebarToggle()
                             Button("Add local project") { model.addLocal() }.buttonStyle(DeskButtonStyle(prominent: true))
@@ -1119,13 +1132,10 @@ enum Command {
                 TextField("Project name", text: $model.renameText)
                 Button("Cancel", role: .cancel) {}
                 Button("Save") { model.renameProject() }
-            } message: {
-                Text("Choose the name shown in Research Desk.")
             }
             .sheet(isPresented: $model.showRemote) {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Add SSH project").font(.title2.bold())
-                    Text("Uses your existing SSH configuration and known hosts. Status checks run Git read-only commands.").foregroundStyle(.secondary)
                     if model.sshHosts.isEmpty {
                         Text("No named hosts found in ~/.ssh/config.").foregroundStyle(.secondary)
                     } else {
@@ -1188,6 +1198,7 @@ enum Command {
                     .keyboardShortcut("s", modifiers: [.control, .command])
             }
         }
+
     }
 }
 

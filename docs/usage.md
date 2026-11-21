@@ -97,3 +97,9 @@ sandbox and approval configuration is preserved, with supported approval prompts
 shown in Progress. Reload reconnects to the saved thread on the next instruction.
 
 The usage settings and Overnight Sessions worker remain Claude-specific.
+
+### Research ideas
+
+Select **Research ideas** at the top of the sidebar to open an automatically saved checklist in the main window. Type an idea and press Enter to add it. Check items off, edit their titles, or use the note button to expand their notes.
+
+Choose **Create project…** on an item to pick This Mac or a configured SSH host, an existing parent folder, and a new folder name. The app creates an empty folder, adds it to Workspaces, and copies the item's notes into project Notes. Existing folders are refused. The checklist retains a link to the created project.

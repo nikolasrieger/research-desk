@@ -184,7 +184,6 @@ struct OvernightSessionsPane: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy)
                 }.buttonStyle(DeskButtonStyle())
-                Text("Arm one night at a time. Nothing runs until you click the button below.").foregroundStyle(DeskStyle.muted)
                 DeskEyebrow(title: "Goal")
                 DeskChoiceMenu(title: goal.rawValue, choices: OvernightGoal.allCases.map(\.rawValue), selection: goal.rawValue) {
                     if let value = OvernightGoal(rawValue: $0) { goal = value }

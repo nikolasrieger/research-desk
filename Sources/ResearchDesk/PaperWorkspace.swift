@@ -79,11 +79,6 @@ struct PaperWorkspace: View {
                 VStack(spacing: 12) {
                     DeskSpatialMark()
                     DeskEyebrow(title: "PaperDaily / Claude Code")
-                    Text("Explore your next discovery.")
-                        .font(.system(size: 28, weight: .light)).tracking(-0.8)
-                    Text("Start Claude, then paste an arXiv link or a paper path.")
-                        .font(.caption).foregroundStyle(DeskStyle.muted)
-                        .multilineTextAlignment(.center)
                     Button("Start Claude") { model.openPaperAgent() }
                         .buttonStyle(DeskButtonStyle(prominent: true)).padding(.top, 4)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)

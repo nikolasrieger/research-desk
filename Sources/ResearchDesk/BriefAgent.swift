@@ -960,7 +960,6 @@ struct BriefAgentPane: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack {
                     VStack(alignment: .leading, spacing: 7) {
-                        DeskEyebrow(title: "Agent workspace")
                         Text("Conversations").font(.system(size: 25, weight: .light))
                     }
                     Spacer()
@@ -1291,7 +1290,6 @@ struct BriefAgentView: View {
                 Text(session.agentName + " model").font(.headline)
                 TextField("Model alias or full model ID", text: $customModel).textFieldStyle(DeskFieldStyle()).frame(width: 300)
                     .onSubmit { session.chooseModel(customModel); showCustomModel = false }
-                Text("Use an ID supported by " + session.agentName + " on this machine or provider.").font(.caption).foregroundStyle(DeskStyle.muted)
                 HStack {
                     Button("Cancel") { showCustomModel = false }
                     Spacer()
@@ -1384,7 +1382,6 @@ struct BriefAgentView: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(file.path).font(.caption.monospaced()).textSelection(.enabled).padding(12)
             Divider()
-            Text("Click lines; shift-click selects a range.").font(.system(size: 10)).foregroundStyle(DeskStyle.muted).padding(10)
             ScrollView(.horizontal) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(file.diff.components(separatedBy: "\n").enumerated()), id: \.offset) { index, line in

@@ -128,7 +128,6 @@ struct NoteImagePicker: View {
             }.frame(minHeight: 260).disabled(busy)
             if !error.isEmpty { DeskErrorBanner(message: error, title: "Could not add image", onDismiss: { error = "" }) }
             HStack {
-                Text("Downloaded images remain available on this Mac.").font(.caption).foregroundStyle(DeskStyle.muted)
                 Spacer()
                 Button("Cancel") { dismiss() }.disabled(busy)
                 Button(busy ? "Loading…" : "Download and insert") { download() }

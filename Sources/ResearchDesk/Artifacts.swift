@@ -158,8 +158,6 @@ struct ArtifactsPane: View {
             } else {
                 VStack(spacing: 8) {
                     Text("Artifacts").font(.system(size: 15, weight: .medium))
-                    Text("Open an HTML file or paste an artifact link.")
-                        .font(.system(size: 12)).foregroundStyle(DeskStyle.muted).multilineTextAlignment(.center)
                 }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.background(DeskStyle.background)
