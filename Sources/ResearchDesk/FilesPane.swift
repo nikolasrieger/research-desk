@@ -43,6 +43,21 @@ enum FileBrowserIO {
         sys.exit('Could not read '+requested_path+': '+str(error))
     """
 
+    static let remoteCopyScript = remotePathScript + "\n" + """
+        import stat,shutil
+        limit=int(sys.argv[3])
+        try:
+            with open(p,'rb') as f:
+                info=os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    sys.exit('Not a regular file: '+requested_path)
+                if limit>=0 and info.st_size>limit:
+                    sys.exit('File is too large to preview. Download it from the Files context menu.')
+                shutil.copyfileobj(f,sys.stdout.buffer,1024*1024)
+        except OSError as error:
+            sys.exit('Could not read '+requested_path+': '+str(error))
+        """
+
     /// Streams remote bytes to disk, so downloads and movies do not pass through base64 or RAM.
     static func copyFile(_ project: Project, path: String, to destination: URL, limit: Int? = nil, cancellation: PreviewCancellation? = nil) throws {
         try cancellation?.check()
@@ -62,36 +77,7 @@ enum FileBrowserIO {
         guard !project.host.hasPrefix("-"), project.host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
             throw CocoaError(.fileReadNoPermission)
         }
-        let script = remotePathScript + "\n" + """
-        import stat,shutil
-        limit=int(sys.argv[3])
-        if not os.path.exists(p):
-            matches=[]
-            scanned=0
-            for directory,folders,files in os.walk(requested_root):
-                folders[:]=[name for name in folders if name not in ('.git','.venv','venv','node_modules','__pycache__')]
-                scanned+=1
-                if scanned>20000:
-                    sys.exit('File not found at '+requested_path+'. Project search limit reached; open it from Files.')
-                if os.path.basename(requested_path) in files:
-                    matches.append(os.path.join(directory,os.path.basename(requested_path)))
-                    if len(matches)>1:
-                        sys.exit('Several files match '+os.path.basename(requested_path)+'. Open the intended file from Files.')
-            if not matches:
-                sys.exit('File not found: '+requested_path+'. Refresh Files or check that the file still exists.')
-            p=matches[0]
-        try:
-            with open(p,'rb') as f:
-                info=os.fstat(f.fileno())
-                if not stat.S_ISREG(info.st_mode):
-                    sys.exit('Not a regular file: '+requested_path)
-                if limit>=0 and info.st_size>limit:
-                    sys.exit('File is too large to preview. Download it from the Files context menu.')
-                shutil.copyfileobj(f,sys.stdout.buffer,1024*1024)
-        except OSError as error:
-            sys.exit('Could not read '+requested_path+': '+str(error))
-        """
-        let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " " + String(limit ?? -1)
+        let command = "python3 -c " + Command.shellQuote(remoteCopyScript) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " " + String(limit ?? -1)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", project.host, command]
@@ -385,6 +371,7 @@ private extension View {
 struct FilesPane: View {
     @ObservedObject var browser: FileBrowserModel
     @State private var hoveredPathID: String?
+    @State private var linkedPath: String?
 
     private var visibleEntries: [RemoteEntry] {
         guard !browser.search.isEmpty else { return browser.entries }
@@ -449,6 +436,17 @@ struct FilesPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DeskStyle.background)
+        .sheet(isPresented: Binding(get: { linkedPath != nil }, set: { if !$0 { linkedPath = nil } })) {
+            if let linkedPath {
+                VStack {
+                    HStack { Spacer(); Button("Close") { self.linkedPath = nil } }
+                    AgentFilePreview(project: browser.project, path: linkedPath, openLink: { url in
+                        guard let path = AgentFileLink.path(url, project: browser.project) else { return .systemAction }
+                        self.linkedPath = path; return .handled
+                    }).id(linkedPath)
+                }.padding(16).frame(minWidth: 700, minHeight: 540)
+            }
+        }
         .task { browser.refreshGitStatus() }
         .onChange(of: browser.directory) { _, _ in hoveredPathID = nil }
         .onDisappear { hoveredPathID = nil }
@@ -513,7 +511,12 @@ struct FilesPane: View {
                 } else if let text = preview.content?.text {
                     if browser.renderMarkdown,
                        ["md", "markdown"].contains(URL(fileURLWithPath: preview.name).pathExtension.lowercased()) {
-                        MarkdownPreview(source: String(text.prefix(300_000)))
+                        MarkdownPreview(source: String(text.prefix(300_000)), linksFilePaths: true)
+                            .environment(\.openURL, OpenURLAction { url in
+                                let resolved = AgentFileLink.relativeLink(url, document: preview.path, project: browser.project)
+                                guard let path = AgentFileLink.path(resolved, project: browser.project) else { return .systemAction }
+                                linkedPath = path; return .handled
+                            })
                     } else {
                         ScrollView([.horizontal, .vertical]) {
                             let shown = String(text.prefix(300_000))

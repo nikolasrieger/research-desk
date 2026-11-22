@@ -68,6 +68,7 @@ struct NotesPane: View {
     let showTerminal: () -> Void
     @State private var preview = false
     @State private var chooseImage = false
+    @State private var linkedPath: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -79,12 +80,27 @@ struct NotesPane: View {
                 ConsolePasteMenu(text: model.notes[project.id] ?? "", project: project, model: model, showAgent: showAgent, showTerminal: showTerminal)
             }
             if preview {
-                MarkdownPreview(source: model.notes[project.id] ?? "", rendersTables: true)
+                MarkdownPreview(source: model.notes[project.id] ?? "", rendersTables: true, linksFilePaths: true)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let path = AgentFileLink.path(url, project: project) else { return .systemAction }
+                        linkedPath = path; return .handled
+                    })
             } else {
                 TextEditor(text: Binding(get: { model.notes[project.id] ?? "" }, set: { model.setNote($0, for: project) }))
                     .font(.system(size: 13, design: .monospaced)).scrollContentBackground(.hidden).accessibilityLabel("Project notes Markdown")
             }
         }.padding(20)
+            .sheet(isPresented: Binding(get: { linkedPath != nil }, set: { if !$0 { linkedPath = nil } })) {
+                if let linkedPath {
+                    VStack {
+                        HStack { Spacer(); Button("Close") { self.linkedPath = nil } }
+                        AgentFilePreview(project: project, path: linkedPath, openLink: { url in
+                            guard let path = AgentFileLink.path(url, project: project) else { return .systemAction }
+                            self.linkedPath = path; return .handled
+                        }).id(linkedPath)
+                    }.padding(16).frame(minWidth: 700, minHeight: 540)
+                }
+            }
             .sheet(isPresented: $chooseImage) {
                 NoteImagePicker(project: project) { url, name in
                     let current = model.notes[project.id] ?? ""

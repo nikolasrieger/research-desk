@@ -1312,7 +1312,7 @@ struct BriefAgentView: View {
                 Spacer(minLength: 0)
             }
             if inspector == 2, let previewPath {
-                AgentFilePreview(project: session.project, path: previewPath, openLink: { openFileLink($0) }).id(previewPath)
+                AgentFilePreview(project: session.project, path: previewPath, openLink: { openFileLink($0) }, sessionID: session.sessionID, agent: session.agent).id(previewPath)
             } else if inspector == 0 && !session.running && session.error.isEmpty && session.permissions.isEmpty && session.codexQuestions.isEmpty && session.pastActions.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "checkmark")
