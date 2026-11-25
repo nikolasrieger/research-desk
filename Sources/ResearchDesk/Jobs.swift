@@ -10,6 +10,7 @@ struct JobHostSnapshot: Codable, Sendable {
 
 @MainActor final class JobsModel: ObservableObject {
     @Published var snapshots: [String: JobHostSnapshot] = [:]
+    @Published private(set) var hiddenJobs: Set<String> = []
     @Published var refreshing = false
     @Published var error = ""
     private var generation = UUID()
@@ -19,6 +20,24 @@ struct JobHostSnapshot: Codable, Sendable {
     init(cacheURL: URL = WorkspaceStorage.fileURL.deletingLastPathComponent().appendingPathComponent("jobs-cache.json")) {
         self.cacheURL = cacheURL
         if let data = try? Data(contentsOf: cacheURL), let saved = try? JSONDecoder().decode([String: JobHostSnapshot].self, from: data) { snapshots = saved }
+        if let data = try? Data(contentsOf: hiddenURL), let saved = try? JSONDecoder().decode(Set<String>.self, from: data) { hiddenJobs = saved }
+    }
+    private var hiddenURL: URL { cacheURL.deletingPathExtension().appendingPathExtension("hidden.json") }
+    func isHidden(_ job: DeskJob, host: String, now: Date = Date()) -> Bool {
+        hiddenJobs.contains(host + ":" + job.id) || job.submitted < now.timeIntervalSince1970 - 3 * 24 * 60 * 60
+    }
+    func hide(_ job: DeskJob, host: String) {
+        var updated = hiddenJobs
+        updated.insert(host + ":" + job.id)
+        saveHidden(updated)
+    }
+    func restoreHidden() { saveHidden([]) }
+    private func saveHidden(_ updated: Set<String>) {
+        do {
+            try FileManager.default.createDirectory(at: hiddenURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(updated).write(to: hiddenURL, options: .atomic)
+            hiddenJobs = updated
+        } catch { self.error = "Could not save hidden jobs: " + error.localizedDescription }
     }
     func activate() -> UUID { generation = UUID(); return generation }
     func deactivate() { generation = UUID(); refreshing = false }
@@ -112,6 +131,9 @@ struct JobsPane: View {
                     Button(showSearch ? "Hide filter" : "Filter jobs", systemImage: "line.3.horizontal.decrease") {
                         showSearch.toggle(); if !showSearch { search = "" }
                     }
+                    if !model.hiddenJobs.isEmpty {
+                        Button("Restore hidden jobs (\(model.hiddenJobs.count))", systemImage: "eye") { model.restoreHidden() }
+                    }
                     Divider()
                     Button("Copy agent instructions", systemImage: "doc.on.doc") {
                         NSPasteboard.general.clearContents()
@@ -181,7 +203,7 @@ struct JobsPane: View {
     }
     private func hostSection(_ host: String) -> some View {
         let snapshot = model.snapshots[host]
-        let jobs = (snapshot?.jobs ?? []).filter { JobsBackend.matches($0, project: project.path) }.filter { search.isEmpty || ($0.name + " " + $0.status).localizedCaseInsensitiveContains(search) }
+        let jobs = (snapshot?.jobs ?? []).filter { JobsBackend.matches($0, project: project.path) && !model.isHidden($0, host: host) }.filter { search.isEmpty || ($0.name + " " + $0.status).localizedCaseInsensitiveContains(search) }
         return VStack(alignment: .leading, spacing: 4) {
             if let error = snapshot?.error, !error.isEmpty {
                 DisclosureGroup {
@@ -205,6 +227,12 @@ struct JobsPane: View {
             ForEach(jobs) { job in
                 MinimalJobRow(job: job, cached: snapshot?.error.isEmpty == false, checked: snapshot?.checked) {
                     selected = host + ":" + job.id
+                }
+                .contextMenu {
+                    Button("Hide from view", systemImage: "eye.slash") {
+                        model.hide(job, host: host)
+                        if selected == host + ":" + job.id { selected = nil }
+                    }
                 }
             }
             if let date = snapshot?.checked, !jobs.isEmpty {
