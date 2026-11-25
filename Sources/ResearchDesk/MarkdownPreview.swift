@@ -123,17 +123,7 @@ struct MarkdownPreview: View, Equatable {
                             inline(block.text).font(.system(size: 14, design: .monospaced)).foregroundStyle(DeskStyle.muted)
                         }.padding(.vertical, 3)
                     case .code:
-                        if rendersTables {
-                            ScrollView(.horizontal) {
-                                Text(block.text).font(.system(size: 12, design: .monospaced))
-                                    .fixedSize(horizontal: true, vertical: false).padding(15)
-                            }.background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 2))
-                                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(DeskStyle.edge, lineWidth: 0.5))
-                        } else {
-                            Text(block.text).font(.system(size: 12, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(15)
-                                .background(DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
-                        }
+                        MarkdownCodeBlock(text: block.text, scrollsHorizontally: rendersTables)
                     case .table(let rows):
                         let widths = MarkdownTableLayout.columnWidths(rows)
                         ScrollView(.horizontal) {
@@ -237,6 +227,47 @@ enum MarkdownTableLayout {
                 cellText($0[column]).components(separatedBy: .newlines)
             }.map { ($0 as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width }.max() ?? 0
             return min(260, max(90, ceil(widest)))
+        }
+    }
+}
+
+private struct MarkdownCodeBlock: View {
+    let text: String
+    let scrollsHorizontally: Bool
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    copied = NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10)).frame(width: 24, height: 24)
+                }.buttonStyle(.plain).foregroundStyle(DeskStyle.muted)
+                    .help(copied ? "Copied" : "Copy code")
+                    .accessibilityLabel(copied ? "Copied code" : "Copy code")
+            }.padding(.horizontal, 6).padding(.top, 4)
+            if scrollsHorizontally {
+                ScrollView(.horizontal) {
+                    Text(text).font(.system(size: 12, design: .monospaced))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 15).padding(.bottom, 15)
+                }
+            } else {
+                Text(text).font(.system(size: 12, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 15).padding(.bottom, 15)
+            }
+        }
+        .background(scrollsHorizontally ? DeskStyle.surface : DeskStyle.background, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DeskStyle.edge, lineWidth: 0.5))
+        .task(id: copied) {
+            guard copied else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            copied = false
         }
     }
 }

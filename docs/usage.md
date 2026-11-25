@@ -129,3 +129,5 @@ Clipboard file copies are kept in the workspace storage folder’s `Clipboard` d
 Right-click a job and choose **Hide from view** to remove its row without stopping the job or deleting its registry record. Hidden jobs stay hidden after refresh and app restarts. Use **Job options → Restore hidden jobs** to bring them back.
 
 Jobs submitted more than 72 hours ago are automatically hidden from the Jobs tab, including running jobs. This only filters the view; it does not cancel jobs or remove their records. Restoring manually hidden jobs does not override this age filter.
+
+Code blocks in rendered agent responses have a copy icon in the upper-right corner. It copies only the block’s code as plain text, preserving indentation, without Markdown fences or surrounding response text. A checkmark confirms the copy.
