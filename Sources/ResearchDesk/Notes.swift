@@ -53,6 +53,12 @@ struct NoteImagePreview: View {
                 .help("Click to enlarge and zoom")
                 .accessibilityLabel(alt.isEmpty ? "Enlarge note image" : "Enlarge " + alt)
                 .accessibilityHint("Opens an image viewer with zoom controls")
+                if let url {
+                    HStack {
+                        Spacer()
+                        FileCopyButton(project: Project(name: "Note attachment", path: url.deletingLastPathComponent().path), path: url.path)
+                    }
+                }
             } else if loading { ProgressView().controlSize(.small) }
             else { Label(alt.isEmpty ? "Image unavailable" : "Image unavailable: " + alt, systemImage: "photo").foregroundStyle(DeskStyle.muted) }
         }
@@ -89,6 +95,7 @@ struct NoteImageDetail: View {
                 Text(title.isEmpty ? url.lastPathComponent : title)
                     .font(.headline).lineLimit(1).help(url.path)
                 Spacer()
+                FileCopyButton(project: Project(name: "Note attachment", path: url.deletingLastPathComponent().path), path: url.path)
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }.padding(14)
             Divider()

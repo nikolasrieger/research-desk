@@ -221,6 +221,7 @@ struct AgentFilePreviewContent: View {
             HStack {
                 Text(URL(fileURLWithPath: path).lastPathComponent).font(.caption).lineLimit(1).help(path)
                 Spacer()
+                FileCopyButton(project: previewProject, path: path)
                 Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(DeskButtonStyle(compact: true))
             }.padding(.bottom, 10)
             if loading { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }

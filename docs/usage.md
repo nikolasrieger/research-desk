@@ -119,3 +119,9 @@ The Jobs tab refreshes every ten seconds only while selected. It reads the lates
 Select a job to load its log: the latest 64 KB initially, then incremental additions while selected. Only the selected job's logs are transferred; terminal-job logs are read once. Output that grows by more than 64 KB between polls is tailed again to keep transfers bounded. Completion notifications while Jobs is closed are not enabled.
 
 The message-based Claude and Codex consoles include the shared JSON registration instructions once per opened conversation model, on its first regular instruction. Compaction and slash commands are left intact. **Job options → Copy agent instructions** copies the same protocol for external CLI conversations. Agents still need to register jobs: arbitrary unregistered commands are not discovered automatically. No separate `desk-job` CLI is installed and status refreshes never call an LLM. A bare PID's disappearance is **unknown**, not success; use an exit-status file for reliable shell outcomes. Slurm jobs absent from both queue and accounting remain **unknown**. Progress percentages and ETAs require workload-specific metrics and are not inferred.
+
+### Copy files and images
+
+Use the copy icon in a file preview, beneath a Notes image, or in its enlarged viewer to copy the actual file to the macOS clipboard. Images also include image data for pasting directly into apps that accept pictures; this uses the original image rather than its scaled preview. Remote files are downloaded before copying. Very large images are copied as files to avoid expanding an oversized bitmap in memory. A checkmark confirms success; copy failures show an error without replacing the clipboard with a path string.
+
+Clipboard file copies are kept in the workspace storage folder’s `Clipboard` directory so they remain pasteable after the preview or app closes. These copies can be removed manually when no longer needed.

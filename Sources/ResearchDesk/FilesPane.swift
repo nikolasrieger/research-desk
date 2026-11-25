@@ -490,6 +490,7 @@ struct FilesPane: View {
                         .labelsHidden()
                         .frame(width: 150)
                     }
+                    FileCopyButton(project: browser.project, path: preview.path)
                     Button { browser.download(path: preview.path) } label: { Label("Download", systemImage: "arrow.down.to.line") }
                         .buttonStyle(DeskButtonStyle()).disabled(browser.downloading)
                     if preview.media == nil {
