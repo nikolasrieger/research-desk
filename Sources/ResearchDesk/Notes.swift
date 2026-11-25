@@ -38,22 +38,78 @@ struct NoteImagePreview: View {
     let alt: String
     @State private var content: PreviewContent?
     @State private var loading = true
+    @State private var showingDetail = false
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let image = content?.image {
-                if url?.pathExtension.lowercased() == "gif" { DeskAnimatedImage(image: image).frame(maxHeight: 500) }
-                else { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 600) }
+                Button { showingDetail = true } label: {
+                    Group {
+                        if url?.pathExtension.lowercased() == "gif" { DeskAnimatedImage(image: image).frame(maxHeight: 500) }
+                        else { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 600) }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Click to enlarge and zoom")
+                .accessibilityLabel(alt.isEmpty ? "Enlarge note image" : "Enlarge " + alt)
+                .accessibilityHint("Opens an image viewer with zoom controls")
             } else if loading { ProgressView().controlSize(.small) }
             else { Label(alt.isEmpty ? "Image unavailable" : "Image unavailable: " + alt, systemImage: "photo").foregroundStyle(DeskStyle.muted) }
         }
         .accessibilityLabel(alt.isEmpty ? "Note image" : alt)
+        .sheet(isPresented: $showingDetail) {
+            if let url { NoteImageDetail(url: url, title: alt) }
+        }
         .task(id: url) {
+            showingDetail = false
             loading = true; content = nil
             let loaded = await Task.detached { () -> PreviewContent? in
                 guard let url, url.isFileURL,
                       let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 15_000_000,
                       let data = try? Data(contentsOf: url) else { return nil }
                 return PreviewContent(data: data, extension: url.pathExtension.lowercased())
+            }.value
+            guard !Task.isCancelled else { return }
+            content = loaded; loading = false
+        }
+    }
+}
+
+/// Load the original only while the detail viewer is open; inline notes keep lightweight previews.
+struct NoteImageDetail: View {
+    let url: URL
+    let title: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var content: PreviewContent?
+    @State private var loading = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(title.isEmpty ? url.lastPathComponent : title)
+                    .font(.headline).lineLimit(1).help(url.path)
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }.padding(14)
+            Divider()
+            if let image = content?.image {
+                DeskZoomableImage(image: image, animated: url.pathExtension.lowercased() == "gif")
+            } else if loading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Label("Image unavailable", systemImage: "photo")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(minWidth: 700, idealWidth: 960, minHeight: 540, idealHeight: 720)
+        .background(DeskStyle.background)
+        .task(id: url) {
+            loading = true; content = nil
+            let loaded = await Task.detached { () -> PreviewContent? in
+                guard url.isFileURL,
+                      let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 15_000_000,
+                      let data = try? Data(contentsOf: url) else { return nil }
+                return PreviewContent(data: data, extension: url.pathExtension.lowercased(), fullResolution: true)
             }.value
             guard !Task.isCancelled else { return }
             content = loaded; loading = false

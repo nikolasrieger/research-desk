@@ -235,7 +235,10 @@ struct BriefAttachment: Identifiable {
         }
     }
     func open(_ saved: SavedAgentSession, project: Project) -> BriefAgentModel {
-        if let existing = chats(for: project).first(where: { $0.sessionID == saved.id && $0.agent == saved.agent }) { return existing }
+        if let existing = chats(for: project).first(where: { $0.sessionID == saved.id && $0.agent == saved.agent }) {
+            if existing.historyLoadFailed && !existing.running { existing.reload() }
+            return existing
+        }
         var workingProject = project
         if let path = saved.workspace, path.hasPrefix("/"), path != project.path {
             workingProject.path = path
@@ -260,6 +263,10 @@ struct BriefAttachment: Identifiable {
     let id = UUID()
     @Published var title = "New conversation"
     @Published var contextUsage = ChatContextUsage()
+    @Published private(set) var compacting = false
+    private var compactionConfirmed = false
+    private var compactRequestID: String?
+    private var jobsInstructionsSent = false
     @Published private(set) var selectedModel = ""
     @Published private(set) var modelOptions = BriefModelOption.defaults
     @Published private(set) var changingModel = false
@@ -285,6 +292,7 @@ struct BriefAttachment: Identifiable {
     @Published var loadingChanges = false
     @Published var changesError = ""
     @Published var loadingHistory = false
+    @Published var historyLoadFailed = false
     @Published var error = ""
     @Published var status = "Ready for an instruction"
     @Published var sessionID = UUID().uuidString.lowercased()
@@ -312,6 +320,7 @@ struct BriefAttachment: Identifiable {
     func useSession(_ saved: SavedAgentSession) {
         guard !running, !loadingHistory, saved.agent == agent, (agent == "codex" ? saved.id.range(of: #"^[A-Za-z0-9_-]{1,255}$"#, options: .regularExpression) != nil : UUID(uuidString: saved.id) != nil) else { return }
         let previous = transport; transport = nil; previous?.stop()
+        jobsInstructionsSent = false
         sessionID = saved.id; resume = true; title = saved.title; error = ""; interrupted = false
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
         status = "Resuming \(saved.title)"
@@ -320,7 +329,7 @@ struct BriefAttachment: Identifiable {
             resume = false; sessionID = UUID().uuidString.lowercased()
             return
         }
-        loadingHistory = true
+        loadingHistory = true; historyLoadFailed = false
         let project = project
         Task {
             let result = await Task.detached { BriefHistory.read(project, id: saved.id, agent: saved.agent) }.value
@@ -329,47 +338,64 @@ struct BriefAttachment: Identifiable {
             case .success(let records):
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
+                contextUsage.compacted = records.last?.contextCompacted == true
                 replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
                 interrupted = records.last?.incomplete == true
                 if interrupted { pendingInstruction = records.last?.instruction ?? "" }
 
                 index = max(0, replies.count - 1)
                 status = interrupted ? "Conversation ended before a final response" : "Saved conversation ready"
-            case .failure(let failure): error = failure.localizedDescription
+            case .failure(let failure):
+                historyLoadFailed = true; error = failure.localizedDescription
+                status = "Could not load saved messages"
             }
         }
     }
     func newConversation() {
         guard !running, !loadingHistory else { return }
         let previous = transport; transport = nil; previous?.stop()
-        sessionID = UUID().uuidString.lowercased(); resume = false
-        contextUsage = ChatContextUsage()
+        sessionID = UUID().uuidString.lowercased(); resume = false; historyLoadFailed = false
+        contextUsage = ChatContextUsage(); jobsInstructionsSent = false
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
         error = ""; status = "Ready for an instruction"
     }
     static func prompt(_ instruction: String, attachments: [BriefAttachment]) -> String {
         instruction + attachments.map { "\n\nSelected file context: \($0.label)\n<context>\n\($0.text)\n</context>" }.joined()
     }
-    func send() {
-        let text = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func outboundPrompt(_ prompt: String) -> String {
+        guard !jobsInstructionsSent, !compacting, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") else { return prompt }
+        jobsInstructionsSent = true
+        return prompt + "\n\n<research-desk-job-registration>\n" + JobsInstructions.text + "\nCurrent workspace root: " + project.path + "\nUse this exact root in the project field, even when the command runs in a subdirectory.\nCurrent conversation: " + agent + " " + sessionID + "\nRegister only jobs you are already authorized to launch. Do not start extra work just to populate Jobs.\n</research-desk-job-registration>"
+    }
+    var canCompact: Bool {
+        resume && !interrupted && !running && !loadingHistory && !reloading && !changingModel && !historyLoadFailed
+    }
+    func compactHistory() {
+        guard canCompact else { return }
+        send(compact: true)
+    }
+    func send(compact: Bool = false) {
+        if compact && !canCompact { return }
+        let text = compact ? "/compact" : instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !running, !loadingHistory, !reloading, !changingModel, !text.isEmpty else { return }
-        let prompt = Self.prompt(text, attachments: attachments)
+        let prompt = Self.prompt(text, attachments: compact ? [] : attachments)
         guard prompt.utf8.count < 512_000 else { error = "Instruction and selected context exceed 512 KB. Select fewer lines."; return }
+        compacting = compact; compactionConfirmed = false; compactRequestID = nil
         progressTask?.cancel(); progressTask = nil; pendingProgress.removeAll()
         error = ""; permissions = []; progress = []; seenToolIDs.removeAll(); running = true; receivedResult = false; resultFailed = false; finalResponse = BriefFinalResponse()
         if title == "New conversation" { title = String(text.prefix(90)) }
         interrupted = false
-        pendingInstruction = text; pendingAttachments = attachments; status = project.isRemote ? "Connecting to \(project.host)…" : "Starting " + agentName + "…"
+        pendingInstruction = text; pendingAttachments = compact ? [] : attachments; status = project.isRemote ? "Connecting to \(project.host)…" : "Starting " + agentName + "…"
         if let connection = transport {
             guard connection.process.isRunning else {
-                running = false
+                running = false; compacting = false
                 status = "Connection is closing; try again in a moment"
                 return
             }
             status = agentName + " is working…"
             if agent == "codex" { sendCodexTurn(prompt) }
-            else { connection.send(["type": "user", "message": ["role": "user", "content": prompt]]) }
-            instruction = ""; attachments.removeAll()
+            else { connection.send(["type": "user", "message": ["role": "user", "content": outboundPrompt(prompt)]]) }
+            if !compact { instruction = ""; attachments.removeAll() }
             return
         }
         let connection = BriefTransport()
@@ -392,7 +418,7 @@ struct BriefAttachment: Identifiable {
                 connection.send(["type": "control_request", "request_id": initializationID,
                                  "request": ["subtype": "initialize"]])
             }
-            instruction = ""; attachments.removeAll()
+            if !compact { instruction = ""; attachments.removeAll() }
             Task { [self] in
                 for await event in events {
                     guard transport === connection else { continue }
@@ -409,10 +435,11 @@ struct BriefAttachment: Identifiable {
                         if running {
                             if !receivedResult {
                                 if error.isEmpty { error = "\(agentName) exited without a final response (exit \(code)). You can send another instruction to resume." }
-                                if instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
+                                if !compacting && instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
                             }
                             interrupted = !receivedResult || resultFailed
                         }
+                        compacting = false; compactRequestID = nil
                         running = false; permissions.removeAll(); codexQuestions = []; codexApprovalIDs = [:]; transport = nil
                         if changingModel { error = "Connection ended while changing the model." }
                         changingModel = false; pendingModelChange = nil
@@ -421,7 +448,7 @@ struct BriefAttachment: Identifiable {
                     }
                 }
             }
-        } catch { running = false; self.error = error.localizedDescription; status = "Could not start " + agentName }
+        } catch { running = false; compacting = false; self.error = error.localizedDescription; status = "Could not start " + agentName }
     }
     static func validModel(_ model: String) -> Bool {
         model.isEmpty || (model.utf8.count <= 256 && model.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$"#, options: .regularExpression) != nil)
@@ -470,19 +497,22 @@ struct BriefAttachment: Identifiable {
             }
             guard transport == nil else { error = "The old connection is still closing. Try Reload again."; reloading = false; return }
             guard resume else { reloading = false; refreshChanges(); return }
-            loadingHistory = true
+            loadingHistory = true; historyLoadFailed = false
             let project = project, id = sessionID, agent = agent
             let result = await Task.detached { BriefHistory.read(project, id: id, agent: agent) }.value
             switch result {
             case .success(let records):
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
+                contextUsage.compacted = records.last?.contextCompacted == true
                 replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
                 index = max(0, replies.count - 1)
                 interrupted = records.last?.incomplete == true
                 error = ""
                 status = interrupted ? "Conversation ended before a final response" : "Ready for an instruction"
-            case .failure(let failure): error = failure.localizedDescription
+            case .failure(let failure):
+                historyLoadFailed = true; error = failure.localizedDescription
+                status = "Could not load saved messages"
             }
             instruction = draft; attachments = context
             loadingHistory = false; reloading = false
@@ -533,7 +563,7 @@ struct BriefAttachment: Identifiable {
                 } else if let prompt = queuedPrompt {
                     if let details = response["response"] as? [String: Any] { updateModels(details) }
                     queuedPrompt = nil
-                    transport?.send(["type": "user", "message": ["role": "user", "content": prompt]])
+                    transport?.send(["type": "user", "message": ["role": "user", "content": outboundPrompt(prompt)]])
                 }
             }
         case "control_cancel_request":
@@ -550,7 +580,10 @@ struct BriefAttachment: Identifiable {
                 if let id = event["session_id"] as? String { sessionID = id }
                 if let model = event["model"] as? String { activeModel = model }
                 resume = true; status = "Claude is working…"; log("Connected to Claude Code")
-            } else if let subtype = event["subtype"] as? String { log(subtype.replacingOccurrences(of: "_", with: " ")) }
+            } else if let subtype = event["subtype"] as? String {
+                if subtype == "compact_boundary" { compactionConfirmed = true }
+                log(subtype.replacingOccurrences(of: "_", with: " "))
+            }
         case "rate_limit_event":
             if let info = event["rate_limit_info"] as? [String: Any], info["status"] as? String == "rejected" {
                 var message = "Claude usage limit reached"
@@ -600,6 +633,13 @@ struct BriefAttachment: Identifiable {
                 let result = (event["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 error = !details.isEmpty ? details : !result.isEmpty ? result : !error.isEmpty ? error : "Claude ended this turn with an error."
                 interrupted = true
+            } else if compacting {
+                interrupted = false
+                if compactionConfirmed { log("Conversation compacted") }
+                else {
+                    let reason = (event["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    error = reason.isEmpty ? "Claude did not confirm compaction. The conversation may be too short to compact." : reason
+                }
             } else {
                 interrupted = false
                 let result = (event["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -613,9 +653,11 @@ struct BriefAttachment: Identifiable {
                     log("Turn completed without a text response")
                 }
             }
+            let didCompact = compacting && compactionConfirmed && !resultFailed
+            compacting = false
             running = false
             permissions.removeAll()
-            status = interrupted ? (error.isEmpty ? "Request ended before completion" : error) : "Ready for your next instruction"
+            status = didCompact ? "Conversation compacted" : interrupted ? (error.isEmpty ? "Request ended before completion" : error) : "Ready for your next instruction"
             refreshChanges()
         default: break
         }
@@ -801,12 +843,12 @@ for folder in glob.glob(os.path.join(root, '*')):
 }
 
 enum BriefHistory {
-    struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int? }
+    struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int?; let contextCompacted: Bool? }
     static func read(_ project: Project, id: String, agent: String = "claude") -> Result<[Record], Error> {
         if agent == "codex" { return CodexHistory.read(project, id: id) }
         guard UUID(uuidString: id) != nil else { return .failure(ResearchError.message("Invalid saved session ID.")) }
         let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(id)
-        let output = project.isRemote ? Command.ssh(project.host, command, maxOutput: 2_000_000) : Command.run("/bin/zsh", ["-c", command], maxOutput: 2_000_000)
+        let output = project.isRemote ? Command.ssh(project.host, command, maxOutput: 2_000_000, timeout: 45) : Command.run("/bin/zsh", ["-c", command], maxOutput: 2_000_000)
         guard output.2 == 0 else { return .failure(ResearchError.message("Could not load saved responses. " + output.1)) }
         do { return .success(try JSONDecoder().decode([Record].self, from: Data(output.0.utf8))) }
         catch { return .failure(error) }
@@ -824,6 +866,7 @@ stop_reason = None
 completion = False
 context_tokens = None
 context_window = None
+context_compacted = False
 
 def text_content(content):
     if isinstance(content, str): return content.strip()
@@ -852,13 +895,14 @@ for raw in data.splitlines():
     if not isinstance(event, dict): continue
     if event.get('isSidechain') or event.get('parent_tool_use_id'): continue
     if event.get('isMeta') and event.get('type') != 'system': continue
-    if event.get('type') == 'system' and event.get('subtype') == 'compact_boundary': context_tokens = None
+    if event.get('type') == 'system' and event.get('subtype') == 'compact_boundary': context_tokens = None; context_compacted = True
     if event.get('queueTranscriptOnly') or event.get('isCompactSummary'): continue
     message = event.get('message', {})
     if not isinstance(message, dict): message = {}
     content = message.get('content', [])
     usage = message.get('usage')
     if event.get('type') == 'assistant' and not event.get('isApiErrorMessage') and isinstance(usage, dict) and 'input_tokens' in usage:
+        context_compacted = False
         context_tokens = sum(max(0, int(usage.get(key) or 0)) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'))
     windows = [v.get('contextWindow') for v in event.get('modelUsage', {}).values() if isinstance(v, dict) and isinstance(v.get('contextWindow'), (int, float)) and v['contextWindow'] > 0]
     if windows: context_window = min(windows)
@@ -866,6 +910,8 @@ for raw in data.splitlines():
         if isinstance(content, list) and any(b.get('type') == 'tool_result' for b in content if isinstance(b, dict)): continue
         text = text_content(content)
         if not text or text.startswith('[Request interrupted by user'): continue
+        if text.strip() == '/compact' or '<command-name>/compact</command-name>' in text:
+            flush(); instruction = ''; continue
         flush()
         instruction = text
         current_id = None; parts = {}; has_tools = False; stop_reason = None; completion = False
@@ -892,6 +938,7 @@ flush()
 if records:
     records[-1]["contextTokens"] = context_tokens
     records[-1]["contextWindow"] = context_window
+    records[-1]["contextCompacted"] = context_compacted
 print(json.dumps(records[-40:]))
 """#
 }
@@ -1109,8 +1156,13 @@ struct BriefAgentView: View {
                         BriefInstructionPreview(source: reply.instruction).id(reply.id)
                         MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).equatable().id(reply.id)
                             .environment(\.openURL, OpenURLAction { openFileLink($0) })
+                    } else if session.historyLoadFailed && !session.running && !session.loadingHistory && !session.reloading {
+                        VStack(spacing: 12) {
+                            Text("Could not load saved messages").font(.system(size: 12)).foregroundStyle(DeskStyle.muted)
+                            Button("Retry") { session.reload() }.buttonStyle(DeskButtonStyle())
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        Text(session.loadingHistory || session.reloading ? "Loading…" : session.running ? "Working…" : session.interrupted ? "Conversation interrupted." : "Write a message to start.")
+                        Text(session.loadingHistory || session.reloading ? "Loading…" : session.running ? "Working…" : session.interrupted ? "Conversation interrupted." : session.hasStoredSession ? "No saved final responses found." : "Write a message to start.")
                             .font(.system(size: 12)).foregroundStyle(DeskStyle.muted)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -1149,7 +1201,7 @@ struct BriefAgentView: View {
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(usage.tokens == nil ? "CONTEXT · AWAITING USAGE" : "CONTEXT")
+                    Text(usage.tokens == nil ? (usage.compacted ? "CONTEXT · COMPACTED · AWAITING USAGE" : "CONTEXT · AWAITING USAGE") : "CONTEXT")
                     Spacer(minLength: 4)
                     if let tokens = usage.tokens {
                         Text(usage.limit.map { "\(tokens.formatted()) / \($0.formatted())" } ?? "\(tokens.formatted()) tokens")
@@ -1167,6 +1219,10 @@ struct BriefAgentView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(usage.label)
             }
+            Button(session.compacting ? "Compacting…" : "Compact") { session.compactHistory() }
+                .buttonStyle(DeskButtonStyle(compact: true))
+                .disabled(!session.canCompact)
+                .help("Summarize older context in this conversation, preserving the current draft and displayed responses")
             Button("Start a new chat", action: startNewChat)
                 .buttonStyle(DeskButtonStyle(compact: true))
                 .disabled(session.running || session.loadingHistory || session.reloading || (session.replies.isEmpty && usage.tokens == nil))
@@ -1192,6 +1248,11 @@ struct BriefAgentView: View {
                 .help("Copy the full displayed response as Markdown")
                 .accessibilityLabel("Copy full response")
                 .disabled(session.current == nil)
+            if session.hasStoredSession {
+                Button { session.reload() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Reload saved messages").accessibilityLabel("Reload saved messages")
+                    .disabled(session.running || session.loadingHistory || session.reloading)
+            }
             Spacer(minLength: 4)
             if session.index < session.replies.count - 1 {
                 Button("Latest") { session.index = session.replies.count - 1 }
@@ -1304,6 +1365,7 @@ struct BriefAgentView: View {
         VStack(spacing: 14) {
             HStack(spacing: 0) {
                 DeskTab(title: "Progress", symbol: "waveform.path", selected: inspector == 0) { inspector = 0 }
+                DeskTab(title: "Jobs", symbol: "list.bullet.rectangle", selected: inspector == 3) { inspector = 3 }
                 DeskTab(title: "Files", selected: inspector == 1) { inspector = 1 }
                 if previewPath != nil {
                     DeskTab(title: "Preview", symbol: "doc", selected: inspector == 2) { inspector = 2 }
@@ -1311,7 +1373,9 @@ struct BriefAgentView: View {
                 }
                 Spacer(minLength: 0)
             }
-            if inspector == 2, let previewPath {
+            if inspector == 3 {
+                JobsPane(project: session.project).id(session.project.host + ":" + session.project.path)
+            } else if inspector == 2, let previewPath {
                 AgentFilePreview(project: session.project, path: previewPath, openLink: { openFileLink($0) }, sessionID: session.sessionID, agent: session.agent).id(previewPath)
             } else if inspector == 0 && !session.running && session.error.isEmpty && session.permissions.isEmpty && session.codexQuestions.isEmpty && session.pastActions.isEmpty {
                 VStack(spacing: 12) {
@@ -1422,8 +1486,15 @@ struct BriefAgentView: View {
 // Codex app-server keeps a persistent process and thread across message turns.
 extension BriefAgentModel {
     private func sendCodexTurn(_ prompt: String) {
+        if compacting {
+            let id = "rd-compact-" + UUID().uuidString
+            compactRequestID = id
+            transport?.send(CodexSessionState.request("thread/compact/start", id: id, params: ["threadId": sessionID]))
+            status = "Compacting conversation…"
+            return
+        }
         codex.beginTurn(); codexQuestions = []; codexApprovalIDs = [:]
-        var params: [String: Any] = ["threadId": sessionID, "input": [["type": "text", "text": prompt]]]
+        var params: [String: Any] = ["threadId": sessionID, "input": [["type": "text", "text": outboundPrompt(prompt)]]]
         if !selectedModel.isEmpty { params["model"] = selectedModel }
         else if let model = codex.defaultModel { params["model"] = model }
         transport?.send(CodexSessionState.request("turn/start", id: "rd-turn-" + UUID().uuidString, params: params))
@@ -1431,7 +1502,8 @@ extension BriefAgentModel {
     }
     private func codexFailed(_ message: String) {
         error = message; status = message; interrupted = true; resultFailed = true; running = false
-        if instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
+        if !compacting && instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
+        compacting = false; compactRequestID = nil
         queuedPrompt = nil; permissions = []; codexQuestions = []
     }
     func answerCodexQuestions() {
@@ -1447,6 +1519,14 @@ extension BriefAgentModel {
         let method = event["method"] as? String
         let params = event["params"] as? [String: Any] ?? [:]
         if method == nil, let id = event["id"] as? String {
+            if id == compactRequestID {
+                if let failure = event["error"] as? [String: Any] {
+                    error = failure["message"] as? String ?? "Codex could not compact this conversation."
+                    status = error; compacting = false; running = false; compactRequestID = nil
+                }
+                // The acknowledgement only accepts the operation; turn/completed finishes it.
+                return
+            }
             if let failure = event["error"] as? [String: Any] {
                 if id == "rd-models" { log("Codex model list unavailable; Default and custom models remain available"); return }
                 codexFailed(failure["message"] as? String ?? "Codex request failed.")
@@ -1502,11 +1582,21 @@ extension BriefAgentModel {
         }
         switch method {
         case "turn/started":
+            if !compacting { compactionConfirmed = false }
             codex.turnID = (params["turn"] as? [String: Any])?["id"] as? String
         case "item/started", "item/completed":
             guard let item = params["item"] as? [String: Any] else { return }
-            if method == "item/completed" { codex.observeItem(item) }
             let type = item["type"] as? String ?? ""
+            if type == "contextCompaction" {
+                if method == "item/started" {
+                    compactionConfirmed = false
+                    contextUsage.tokens = nil; contextUsage.compacted = false
+                } else {
+                    compactionConfirmed = true
+                    if contextUsage.tokens == nil { contextUsage.didCompact() }
+                }
+            }
+            if method == "item/completed", !compacting { codex.observeItem(item) }
             if method == "item/started" {
                 if ["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall"].contains(type) {
                     codex.fallbackAnswer = ""
@@ -1517,10 +1607,27 @@ extension BriefAgentModel {
         case "thread/tokenUsage/updated":
             if let usage = params["tokenUsage"] as? [String: Any] {
                 contextUsage.tokens = (usage["last"] as? [String: Any])?["totalTokens"] as? Int
+                contextUsage.compacted = false
                 contextUsage.limit = usage["modelContextWindow"] as? Int
             }
+        case "thread/compacted":
+            // Some servers emit this deprecated event as well as the item lifecycle.
+            if !compactionConfirmed { contextUsage.didCompact() }
+            compactionConfirmed = true
         case "turn/completed":
             let turn = params["turn"] as? [String: Any] ?? [:]
+            if compacting {
+                receivedResult = true
+                if turn["status"] as? String == "completed" {
+                    compacting = false; compactRequestID = nil; running = false; interrupted = false
+                    status = "Conversation compacted"; log(status)
+                    // Older servers may omit the contextCompaction lifecycle.
+                    if !compactionConfirmed { contextUsage.didCompact() }
+                } else {
+                    codexFailed((turn["error"] as? [String: Any])?["message"] as? String ?? "Codex compaction did not complete.")
+                }
+                return
+            }
             for item in turn["items"] as? [[String: Any]] ?? [] { codex.observeItem(item) }
             receivedResult = true; resume = true
             if turn["status"] as? String == "completed" {

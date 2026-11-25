@@ -67,7 +67,7 @@ root = os.environ.get('CODEX_HOME', os.path.expanduser('~/.codex'))
 files = glob.glob(os.path.join(root, 'sessions', '*', '*', '*', '*'+sys.argv[1]+'.jsonl'))
 if not files: sys.exit('Codex transcript is not available on this machine.')
 path = max(files, key=os.path.getmtime)
-records=[]; instruction=''; final=''; fallback=''; phased=False; active=False; tokens=None; window=None
+records=[]; instruction=''; final=''; fallback=''; phased=False; active=False; tokens=None; window=None; compacted=False
 
 def flush(complete=False, message=None):
     global instruction, final, fallback, phased, active
@@ -86,6 +86,7 @@ for line in lines:
     p=e.get('payload', {})
     if not isinstance(p,dict): continue
     typ=p.get('type')
+    if e.get('type')=='compacted' or (e.get('type')=='event_msg' and typ=='context_compacted'): tokens=None; compacted=True
     if e.get('type')=='event_msg':
         if typ=='user_message':
             if instruction: flush()
@@ -94,7 +95,7 @@ for line in lines:
         elif typ in ('turn_aborted','task_failed'): flush()
         elif typ=='token_count':
             info=p.get('info') or {}; usage=info.get('last_token_usage') or {}
-            tokens=usage.get('total_tokens'); window=info.get('model_context_window')
+            tokens=usage.get('total_tokens'); window=info.get('model_context_window'); compacted=False
     elif e.get('type')=='response_item':
         if typ=='message' and p.get('role')=='assistant':
             text='\n\n'.join(b.get('text','') for b in p.get('content',[]) if b.get('type')=='output_text')
@@ -104,7 +105,7 @@ for line in lines:
             elif phase is None: fallback=text
         elif typ in ('function_call','custom_tool_call','web_search_call'): fallback=''
 if instruction: flush()
-if records: records[-1].update(contextTokens=tokens, contextWindow=window)
+if records: records[-1].update(contextTokens=tokens, contextWindow=window, contextCompacted=compacted)
 print(json.dumps(records[-40:]))
 """#
 }

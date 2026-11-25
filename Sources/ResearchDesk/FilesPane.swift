@@ -80,7 +80,7 @@ enum FileBrowserIO {
         let command = "python3 -c " + Command.shellQuote(remoteCopyScript) + " " + Command.shellQuote(project.path) + " " + Command.shellQuote(path) + " " + String(limit ?? -1)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", project.host, command]
+        process.arguments = Command.sshArguments(host: project.host, command: command)
         let errorURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         guard FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600]),
               FileManager.default.createFile(atPath: errorURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) }
@@ -500,14 +500,8 @@ struct FilesPane: View {
                 Rectangle().fill(DeskStyle.edge).frame(height: 1)
                 if let media = preview.media {
                     DeskMoviePlayer(media: media).id(media.url)
-                } else if preview.isGIF, let image = preview.content?.image {
-                    DeskAnimatedImage(image: image).padding(24)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if preview.isImage, let image = preview.content?.image {
-                    ScrollView([.horizontal, .vertical]) {
-                        Image(nsImage: image).resizable().scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity).padding(24)
-                    }
+                    DeskZoomableImage(image: image, animated: preview.isGIF).id(preview.path)
                 } else if let text = preview.content?.text {
                     if browser.renderMarkdown,
                        ["md", "markdown"].contains(URL(fileURLWithPath: preview.name).pathExtension.lowercased()) {

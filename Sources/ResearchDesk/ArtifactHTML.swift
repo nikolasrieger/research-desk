@@ -61,7 +61,7 @@ enum ArtifactHTML {
         defer { try? output.close(); try? errors.close(); try? FileManager.default.removeItem(at: errorsURL) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", host, command]
+        process.arguments = Command.sshArguments(host: host, command: command)
         process.standardOutput = output; process.standardError = errors
         try process.run()
         let deadline = Date().addingTimeInterval(300)

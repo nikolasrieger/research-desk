@@ -232,8 +232,7 @@ struct AgentFilePreviewContent: View {
             } else if let pdf {
                 PDFDocumentView(document: pdf)
             } else if let image = content?.image {
-                if ext == "gif" { DeskAnimatedImage(image: image) }
-                else { ScrollView([.horizontal, .vertical]) { Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 1200).padding(8) } }
+                DeskZoomableImage(image: image, animated: ext == "gif").id(path)
             } else if let text = content?.text {
                 if ["md", "markdown"].contains(ext) {
                     MarkdownPreview(source: text, rendersTables: true, linksFilePaths: true)

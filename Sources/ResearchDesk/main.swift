@@ -526,28 +526,20 @@ enum Command {
 
     static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-    private final class HostLocks: @unchecked Sendable {
-        let lock = NSLock()
-        var hosts: [String: NSLock] = [:]
-        func forHost(_ host: String) -> NSLock {
-            lock.lock(); defer { lock.unlock() }
-            if let existing = hosts[host] { return existing }
-            let value = NSLock(); hosts[host] = value; return value
-        }
-    }
-    private static let sshLocks = HostLocks()
-    static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000, timeout: TimeInterval = 12) -> (String, String, Int32) {
-        guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
-            return ("", "Invalid SSH host", -1)
-        }
-        let hostLock = sshLocks.forHost(host)
-        hostLock.lock(); defer { hostLock.unlock() }
-        var arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
+    static func sshArguments(host: String, command: String) -> [String] {
+        var arguments = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20",
+                         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
         if let sshControlDirectory {
             arguments += ["-o", "ControlMaster=auto", "-o", "ControlPersist=2m", "-o", "ControlPath=\(sshControlDirectory)/%C"]
         }
-        arguments += [host, command]
-        return run("/usr/bin/ssh", arguments, timeout: timeout, maxOutput: maxOutput)
+        return arguments + [host, command]
+    }
+
+    static func ssh(_ host: String, _ command: String, maxOutput: Int = 200_000, timeout: TimeInterval = 30) -> (String, String, Int32) {
+        guard !host.hasPrefix("-"), host.range(of: #"^[a-zA-Z0-9._@-]+$"#, options: .regularExpression) != nil else {
+            return ("", "Invalid SSH host", -1)
+        }
+        return run("/usr/bin/ssh", sshArguments(host: host, command: command), timeout: timeout, maxOutput: maxOutput)
     }
 
     static func closeSSHConnections(hosts: [String]) {

@@ -40,6 +40,7 @@ for line in sys.stdin:
     elif m=='model/list': emit({'id':rid,'result':{'data':[{'id':'test-model','model':'test-model','displayName':'Test model'}]}})
     elif m in ('thread/start','thread/resume'): emit({'id':rid,'result':{'thread':{'id':THREAD},'model':'test-model'}})
     elif m=='turn/start':
+        assert ('<research-desk-job-registration>' in e['params']['input'][0]['text']) == (turn==0)
         turn+=1
         emit({'id':rid,'result':{'turn':{'id':str(turn),'status':'inProgress'}}})
         emit({'method':'item/completed','params':{'threadId':THREAD,'item':{'type':'agentMessage','phase':'commentary','text':'Not the final response'}}})
@@ -88,6 +89,8 @@ for line in sys.stdin:
             ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": "commentary", "content": [["type": "output_text", "text": "Intermediate"]]]],
             ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": "final_answer", "content": [["type": "output_text", "text": "Final answer"]]]],
             ["type": "event_msg", "payload": ["type": "task_complete"]],
+            ["type": "event_msg", "payload": ["type": "token_count", "info": ["last_token_usage": ["total_tokens": 160000], "model_context_window": 200000]]],
+            ["type": "compacted", "payload": ["message": "Summary"]],
             ["type": "event_msg", "payload": ["type": "user_message", "message": "Unfinished"]]
         ]
         let data = try events.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }.joined(separator: "\n")
@@ -100,6 +103,9 @@ for line in sys.stdin:
         XCTAssertEqual(records[0].markdown, "Final answer")
         XCTAssertEqual(records[1].incomplete, true)
         XCTAssertEqual(records[1].instruction, "Unfinished")
+        XCTAssertNil(records.last?.contextTokens)
+        XCTAssertEqual(records.last?.contextCompacted, true)
+        XCTAssertEqual(records.last?.contextWindow, 200000)
         let discovery = "CODEX_HOME=" + Command.shellQuote(root.path) + " CLAUDE_CONFIG_DIR=" + Command.shellQuote(root.appendingPathComponent("claude").path) + " python3 -c " + Command.shellQuote(BriefConversationHistory.script)
         let listing = Command.run("/bin/zsh", ["-c", discovery])
         XCTAssertEqual(listing.2, 0, listing.1)

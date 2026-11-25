@@ -3,13 +3,16 @@ import Foundation
 struct ChatContextUsage: Equatable {
     var tokens: Int?
     var limit: Int?
+    var compacted = false
+    mutating func didCompact() { tokens = nil; compacted = true }
     var warningThreshold: Int { limit.map { max(1, $0 * 3 / 4) } ?? 150_000 }
     var isLarge: Bool { (tokens ?? 0) >= warningThreshold }
     mutating func observe(_ event: [String: Any]) {
         guard event["parent_tool_use_id"] as? String == nil, event["isSidechain"] as? Bool != true else { return }
-        if event["type"] as? String == "system", event["subtype"] as? String == "compact_boundary" { tokens = nil }
+        if event["type"] as? String == "system", event["subtype"] as? String == "compact_boundary" { didCompact() }
         if event["type"] as? String == "assistant", let message = event["message"] as? [String: Any],
            let usage = message["usage"] as? [String: Any], usage["input_tokens"] != nil {
+            compacted = false
             tokens = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
                 .reduce(0) { $0 + max(0, (usage[$1] as? NSNumber)?.intValue ?? 0) }
         }
@@ -20,7 +23,7 @@ struct ChatContextUsage: Equatable {
         }
     }
     var label: String {
-        guard let tokens else { return "Context: awaiting token count" }
+        guard let tokens else { return compacted ? "Context compacted: awaiting updated token count" : "Context: awaiting token count" }
         let count = tokens.formatted()
         return "Context: " + count + (limit.map { " / " + $0.formatted() } ?? "") + " tokens"
     }

@@ -49,6 +49,8 @@ The sidebar button beside Research Desk, or at the start of the tab row when col
 
 **Papers** collects arXiv papers separately for each workspace. Add an abstract/PDF URL or paper ID to fetch the title, authors, abstract, and citation metadata. Search the collection, assign comma-separated tags or presets such as **baseline** and **related work**, copy BibTeX, open arXiv, or read the PDF inside the app. Collections persist in `~/Library/Application Support/ResearchDesk/papers.json`. Metadata requests are spaced at least three seconds apart; PDF previews are limited to 50 MB.
 
+In **Notes → Preview**, click an image to open the detail viewer. Use +/− or pinch to zoom, scroll to explore the enlarged image, and choose **Fit** or **100%** to reset the view. The viewer loads the original image for detail and supports animated GIFs. Press Escape or **Close** to return to notes.
+
 **Paste into…** in Notes and paper details inserts notes or an arXiv link into the workspace's running agent console or terminal. Start the destination first. It does not press Enter; shell pastes flatten newlines, while agents supporting bracketed paste retain paragraphs.
 
 **Artifacts** displays hosted Claude HTML artifacts in an embedded browser. **Latest in chat** checks up to the last 8 MB of the current Claude session's transcript, locally or via SSH, for an artifact link. New Claude sessions receive an explicit UUID so lookup stays tied to that chat. This is best-effort link discovery, not a cloud artifact listing: if no link is recorded, use `/artifacts` in Claude Code and paste its URL. Private artifacts may require Claude sign-in inside the viewer. An external-browser fallback is available. Viewing does not publish an artifact or change its access permissions.
@@ -98,8 +100,22 @@ shown in Progress. Reload reconnects to the saved thread on the next instruction
 
 The usage settings and Overnight Sessions worker remain Claude-specific.
 
+The context meter in the message console has a **Compact** button for Claude and Codex. It summarizes older context in the same conversation using the agent's native compaction command. Your draft, attachments, and displayed replies remain available. Compaction is disabled during requests, history loading, model changes, and interrupted turns. After a confirmed compaction, the old token count is cleared; **Compacted · awaiting usage** appears until the agent reports updated active-context usage. This is separate from cumulative billing usage. Stop can close a compaction request's connection; an unavailable compaction command is reported as an error.
+
 ### Research ideas
 
 Select **Research ideas** at the top of the sidebar to open an automatically saved checklist in the main window. Type an idea and press Enter to add it. Check items off, edit their titles, or use the note button to expand their notes.
 
 Choose **Create project…** on an item to pick This Mac or a configured SSH host, an existing parent folder, and a new folder name. The app creates an empty folder, adds it to Workspaces, and copies the item's notes into project Notes. Existing folders are refused. The checklist retains a link to the created project.
+
+### Jobs
+
+Open **Agent console → Jobs**, beside **Progress**, to track the current project’s jobs on its local or SSH host. Jobs are shared across conversations in that project; other projects’ jobs are excluded before process or scheduler checks. **Add job** can launch a shell command now or at a chosen time, adopt an existing PID on the workspace host, or register an existing Slurm job ID (including an individual array task). Launching runs `/bin/sh -c` in the chosen workspace; cluster compute work should be submitted through the cluster scheduler, then registered by ID. Python 3 is required on each host; Slurm tracking also requires `squeue` and `sacct` on that host's noninteractive SSH PATH.
+
+Job metadata lives on its execution/scheduler host in `~/.local/state/researchdesk/jobs/<id>.json`. It is independent of the app. Shell launches use a small detached per-job wrapper to wait for a scheduled start, capture combined output, and record start/end times and the actual exit code. Closing Research Desk does not stop launched jobs. The wrapper sleeps until the scheduled time and waits for the command; it does no periodic monitoring. A machine reboot interrupts it; missing processes without a saved outcome become **unknown** when checked. Registering a job does not itself launch or schedule it.
+
+The Jobs tab refreshes every ten seconds only while selected. It reads the latest 1,000 registry records per host, batches active PID checks and Slurm queries, and skips terminal jobs' process/scheduler checks. At most four hosts refresh concurrently; unavailable hosts back off up to five minutes. Refresh overrides backoff. Previously checked states are cached locally and marked as cached when a host cannot be reached. Elapsed time ticks locally without contacting the host. A request already in flight can finish after leaving Jobs, but no new polling starts and its result is discarded.
+
+Select a job to load its log: the latest 64 KB initially, then incremental additions while selected. Only the selected job's logs are transferred; terminal-job logs are read once. Output that grows by more than 64 KB between polls is tailed again to keep transfers bounded. Completion notifications while Jobs is closed are not enabled.
+
+The message-based Claude and Codex consoles include the shared JSON registration instructions once per opened conversation model, on its first regular instruction. Compaction and slash commands are left intact. **Job options → Copy agent instructions** copies the same protocol for external CLI conversations. Agents still need to register jobs: arbitrary unregistered commands are not discovered automatically. No separate `desk-job` CLI is installed and status refreshes never call an LLM. A bare PID's disappearance is **unknown**, not success; use an exit-status file for reliable shell outcomes. Slurm jobs absent from both queue and accounting remain **unknown**. Progress percentages and ETAs require workload-specific metrics and are not inferred.

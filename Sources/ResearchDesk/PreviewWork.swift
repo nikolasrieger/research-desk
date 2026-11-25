@@ -17,9 +17,9 @@ final class PreviewCancellation: @unchecked Sendable {
 final class PreviewContent: @unchecked Sendable {
     let image: NSImage?
     let text: String?
-    init(data: Data, extension ext: String) {
+    init(data: Data, extension ext: String, fullResolution: Bool = false) {
         if ["png", "jpg", "jpeg", "gif", "tiff", "tif", "bmp", "heic", "webp"].contains(ext) {
-            if ext == "gif" { image = NSImage(data: data) }
+            if ext == "gif" || fullResolution { image = NSImage(data: data) }
             else if let source = CGImageSourceCreateWithData(data as CFData, nil),
                     let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                         kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -27,7 +27,10 @@ final class PreviewContent: @unchecked Sendable {
                         kCGImageSourceCreateThumbnailWithTransform: true,
                         kCGImageSourceShouldCacheImmediately: true
                     ] as CFDictionary) {
-                image = NSImage(cgImage: thumbnail, size: .zero)
+                let bitmap = NSBitmapImageRep(cgImage: thumbnail)
+                let preview = NSImage(size: bitmap.size)
+                preview.addRepresentation(bitmap)
+                image = preview
             } else { image = nil }
             text = nil
         } else {

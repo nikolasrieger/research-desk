@@ -14,6 +14,10 @@ final class ChatContextUsageTests: XCTestCase {
         XCTAssertFalse(usage.isLarge)
         usage.observe(["type": "system", "subtype": "compact_boundary"])
         XCTAssertNil(usage.tokens)
+        XCTAssertTrue(usage.compacted)
+        XCTAssertEqual(usage.limit, 1000000)
+        usage.observe(["type": "result", "usage": ["input_tokens": 151500]])
+        XCTAssertNil(usage.tokens) // Cumulative billing usage is not active context.
         usage.observe(["type": "assistant", "message": ["usage": ["input_tokens": 2000]]])
         XCTAssertEqual(usage.tokens, 2000)
     }
@@ -57,5 +61,22 @@ final class ChatContextUsageTests: XCTestCase {
         let records = try JSONDecoder().decode([BriefHistory.Record].self, from: output)
         XCTAssertEqual(records.last?.contextTokens, 161100)
         XCTAssertEqual(records.last?.contextWindow, 200000)
+        let boundary: [String: Any] = ["type": "system", "subtype": "compact_boundary", "compact_metadata": ["pre_tokens": 161100]]
+        let file = folder.appendingPathComponent(id + ".jsonl")
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: JSONSerialization.data(withJSONObject: boundary) + Data([10]))
+        try handle.close()
+        let replay = Process()
+        replay.executableURL = process.executableURL; replay.arguments = process.arguments; replay.environment = process.environment
+        let replayPipe = Pipe(); replay.standardOutput = replayPipe
+        try replay.run()
+        let replayData = replayPipe.fileHandleForReading.readDataToEndOfFile()
+        replay.waitUntilExit()
+        XCTAssertEqual(replay.terminationStatus, 0)
+        let compacted = try JSONDecoder().decode([BriefHistory.Record].self, from: replayData)
+        XCTAssertNil(compacted.last?.contextTokens)
+        XCTAssertEqual(compacted.last?.contextCompacted, true)
+        XCTAssertEqual(compacted.last?.contextWindow, 200000)
     }
 }
