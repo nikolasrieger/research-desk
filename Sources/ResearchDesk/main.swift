@@ -635,6 +635,7 @@ enum Command {
     @Published var selected: UUID?
     @Published var paperSelected = false
     @Published var ideasSelected = false
+    @Published var statisticsSelected = false
     @Published var storageError = ""
     @Published var busy = false
     @Published var showRemote = false
@@ -702,6 +703,8 @@ enum Command {
     }
 
     var current: Project? { projects.first { $0.id == selected } }
+    var statisticsProject: Project? { statisticsSelected || ideasSelected || paperSelected ? nil : current }
+    var statisticsSelectionKey: String? { statisticsProject.map { StatisticsProject.key(host: $0.host, path: $0.path) } }
 
     func persist() {
         do {
@@ -720,6 +723,7 @@ enum Command {
     }
 
     func selectPaperWorkspace() {
+        statisticsSelected = false
         ideasSelected = false
         paperSelected = true
         saveSelection()
@@ -766,6 +770,7 @@ enum Command {
                 projects.append(project)
                 selected = project.id
                 paperSelected = false
+                statisticsSelected = false
             }
             persist(); refresh()
         }
@@ -776,7 +781,7 @@ enum Command {
         let path = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, path.hasPrefix("/"), !projects.contains(where: { $0.host == host && $0.path == path }) else { return }
         let project = Project(name: URL(fileURLWithPath: path).lastPathComponent, path: path, host: host)
-        projects.append(project); selected = project.id; paperSelected = false
+        projects.append(project); selected = project.id; paperSelected = false; statisticsSelected = false
         remoteHost = ""; remotePath = ""; showRemote = false
         persist(); refresh()
     }
@@ -884,6 +889,7 @@ enum Command {
     }
 
     func select(_ project: Project) {
+        statisticsSelected = false
         ideasSelected = false
         selected = project.id
         paperSelected = false
@@ -978,6 +984,7 @@ enum Command {
 
 @main struct ResearchDeskApp: App {
     @StateObject private var model = DeskModel()
+    @StateObject private var statistics = StatisticsStore.shared
     @State private var showUsage = false
     @AppStorage("sidebarHidden", store: UserDefaults(suiteName: WorkspaceStorage.domain)) private var sidebarHidden = false
     var body: some Scene {
@@ -996,16 +1003,24 @@ enum Command {
                         DeskSidebarToggle()
                     }.foregroundStyle(DeskStyle.muted)
                         .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 26)
-                    Button { model.ideasSelected = true } label: {
+                    Button { model.statisticsSelected = false; model.ideasSelected = true } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "square.and.pencil").font(.system(size: 15))
                             Text("Research ideas").font(.system(size: 13, weight: .medium))
                             Spacer(minLength: 0)
                         }.padding(.horizontal, 13).frame(height: 42)
-                    }.buttonStyle(DeskSidebarRowStyle(selected: model.ideasSelected))
+                    }.buttonStyle(DeskSidebarRowStyle(selected: model.ideasSelected && !model.statisticsSelected))
                         .background(DeskStyle.highlight.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
                         .overlay { RoundedRectangle(cornerRadius: 11).strokeBorder(DeskStyle.highlight.opacity(0.18)) }
                         .padding(.horizontal, 12).padding(.bottom, 22)
+                    Button { model.statisticsSelected = true } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "chart.bar.xaxis").font(.system(size: 15))
+                            Text("Statistics").font(.system(size: 13, weight: .medium))
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 13).frame(height: 42)
+                    }.buttonStyle(DeskSidebarRowStyle(selected: model.statisticsSelected))
+                        .padding(.horizontal, 12).padding(.bottom, 18)
                     HStack(spacing: 7) {
                         Text("Workspaces").font(.system(size: 12, weight: .medium))
                         Text("\(model.projects.count)")
@@ -1022,10 +1037,10 @@ enum Command {
                                     HStack(spacing: 11) {
                                         Image(systemName: project.isRemote ? "network" : "folder.fill")
                                             .font(.system(size: 14))
-                                            .foregroundStyle(model.selected == project.id && !model.paperSelected && !model.ideasSelected ? DeskStyle.accent : DeskStyle.muted)
+                                            .foregroundStyle(model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? DeskStyle.accent : DeskStyle.muted)
                                             .frame(width: 19)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected && !model.ideasSelected ? .medium : .regular)).lineLimit(1)
+                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? .medium : .regular)).lineLimit(1)
                                             if project.isRemote {
                                                 Text(project.host).font(.system(size: 10)).foregroundStyle(DeskStyle.muted).lineLimit(1)
                                             }
@@ -1037,7 +1052,7 @@ enum Command {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .contentShape(RoundedRectangle(cornerRadius: 9))
                                 }
-                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected && !model.ideasSelected))
+                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected))
                                 .contextMenu {
                                     Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
                                     Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
@@ -1087,7 +1102,9 @@ enum Command {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 238)
                 .navigationTitle("")
             } detail: {
-                if model.ideasSelected {
+                if model.statisticsSelected {
+                    StatisticsPane(projects: model.projects, store: statistics)
+                } else if model.ideasSelected {
                     ResearchIdeasPane(model: model)
                 } else if model.paperSelected {
                     PaperWorkspace(model: model)
@@ -1118,7 +1135,19 @@ enum Command {
             .preferredColorScheme(.dark)
             .tint(DeskStyle.highlight)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                statistics.finish()
                 model.shutdown()
+            }
+            .onChange(of: model.statisticsSelectionKey, initial: true) { _, _ in
+                statistics.start()
+                statistics.select(model.statisticsProject)
+            }
+            .onDisappear { statistics.select(nil) }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)) { _ in
+                statistics.select(nil)
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
+                statistics.select(model.statisticsProject)
             }
             .alert("Rename project", isPresented: $model.showRename) {
                 TextField("Project name", text: $model.renameText)

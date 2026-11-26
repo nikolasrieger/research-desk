@@ -7,6 +7,7 @@ struct DeskJob: Codable, Identifiable, Sendable {
     var kind: String
     var submitted: Double
     var status: String
+    var usesGPU: Bool?
     var command: String?
     var pid: Int?
     var processStart: String?
@@ -50,6 +51,9 @@ enum JobsBackend {
     }
     static func list(host: String, project: String? = nil) throws -> [DeskJob] {
         try JSONDecoder().decode([DeskJob].self, from: invoke(host: host, action: "list", payload: project.map { ["project": $0] } ?? [:]))
+    }
+    static func statistics(host: String) throws -> [DeskJob] {
+        try JSONDecoder().decode([DeskJob].self, from: invoke(host: host, action: "statistics"))
     }
     static func add(project: Project, name: String, kind: String, value: String, log: String, scheduled: Date?) throws -> DeskJob {
         var payload: [String: Any] = ["name": name, "project": project.path, "kind": kind, "log": log]
@@ -186,6 +190,7 @@ def register(p,launch=False):
         log=pathlib.Path(p['log']).expanduser()
         if not log.is_absolute(): log=pathlib.Path(project)/log
         j['log']=str(log)
+    if isinstance(p.get('usesGPU'),bool): j['usesGPU']=p['usesGPU']
     if p.get('conversation'): j['conversation']=str(p['conversation'])[:500]
     if kind=='process':
         pid=p.get('pid')
@@ -253,10 +258,37 @@ def log_chunk(p):
         f.seek(offset); data=f.read(65536)
         return dict(text=data.decode('utf-8','replace'),offset=f.tell(),inode=inode,reset=reset)
 
+def statistics():
+    jobs=list_jobs()
+    slurm=[j for j in jobs if j['kind']=='slurm' and re.fullmatch(r'\d+(?:_\d+)?',str(j.get('schedulerID','')))]
+    if slurm:
+        ids=','.join(sorted(set(j['schedulerID'] for j in slurm)))
+        code,out,err=run(['sacct','--noheader','--parsable2','--allocations','--jobs',ids,'--format=JobIDRaw%64,AllocTRES%1000,ElapsedRaw,Start,End,State,Submit'])
+        rows={}
+        if code==0:
+            for line in out.splitlines():
+                p=[part.strip() for part in line.split('|')]
+                if len(p)>=6: rows[p[0]]=p
+        for j in slurm:
+            p=rows.get(j['schedulerID'])
+            if not p: continue
+            tres=dict(item.split('=',1) for item in p[1].split(',') if '=' in item)
+            if tres:
+                j['usesGPU']=any(key.startswith('gres/gpu') and float(value)>0 for key,value in tres.items() if key.startswith('gres/gpu'))
+            try: j['runtime']=max(0,float(p[2]))
+            except ValueError: pass
+            start,end=stamp(p[3]),stamp(p[4])
+            if start: j['started']=start
+            if end: j['ended']=end
+            if len(p)>6 and stamp(p[6]): j['submitted']=stamp(p[6])
+            j['checked']=time.time()
+    return jobs
+
 if __name__=='__main__':
     try:
         action=sys.argv[1]; payload=json.loads(sys.argv[2]) if len(sys.argv)>2 else {}
         if action=='list': result=list_jobs(payload.get('project'))
+        elif action=='statistics': result=statistics()
         elif action in ('register','launch'): result=register(payload,action=='launch')
         elif action=='log': result=log_chunk(payload)
         else: raise ValueError('Unknown jobs action')

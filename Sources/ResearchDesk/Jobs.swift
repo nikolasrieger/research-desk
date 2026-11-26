@@ -66,6 +66,7 @@ struct JobHostSnapshot: Codable, Sendable {
             guard token == generation, !Task.isCancelled else { return }
             for result in results {
                 if result.error.isEmpty {
+                    StatisticsStore.shared.ingest(result.jobs, host: result.host)
                     snapshots[result.host] = result; failures[result.host] = 0; retryAfter[result.host] = nil
                 } else {
                     var previous = snapshots[result.host] ?? JobHostSnapshot(host: result.host)
@@ -388,6 +389,8 @@ struct AddJobPane: View {
 enum JobsInstructions {
     static let text = #"""
 For every long-running or scheduled job, register a JSON record on the machine that owns the process or scheduler, under ~/.local/state/researchdesk/jobs/<id>.json. Research Desk reads these records without LLM calls. Do not claim a job completed without an exit code or scheduler result.
+
+When known, add usesGPU=true for a GPU job or usesGPU=false for a CPU-only job. Leave it absent if uncertain; statistics will keep it unclassified. This field records resource type, not utilization. Set project to the workspace root rather than a command's subdirectory.
 
 Schema v1: {"version":1,"id":"<uuid>","name":"<purpose>","project":"<absolute workspace root>","kind":"process","submitted":<Unix seconds>,"status":"unknown","pid":<integer>,"processStart":"<exact trimmed output of ps -p PID -o lstart=>","started":<Unix seconds if known>,"log":"<absolute log path>","conversation":"<agent + session ID>"}.
 Use kind="slurm" and schedulerID="<job ID or individual array task ID>" instead of pid/processStart for Slurm. Register on the login host where squeue/sacct can see that job. Use one record per individual array task, not an array-range expression. For a scheduled job, use status="queued" and scheduled=<Unix start time>, then update pid and processStart when it actually launches. Registering a record does not schedule or launch the command: use the existing scheduler, or Research Desk's Launch job UI.
