@@ -19,29 +19,20 @@ struct AgentModelMenu: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.openMenu(_:)))
-        button.isBordered = false
-        button.font = .systemFont(ofSize: 12)
-        button.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
-        button.imagePosition = .imageTrailing
-        button.contentTintColor = NSColor(DeskStyle.accent)
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 8
-        button.layer?.borderWidth = 0.5
-        button.layer?.borderColor = NSColor(DeskStyle.edge).cgColor
-        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.025).cgColor
+        let button = ModelMenuButton(title: title)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.openMenu(_:))
         updateNSView(button, context: context)
         return button
     }
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.parent = self
-        button.title = title
+        (button as? ModelMenuButton)?.update(title: title, enabled: enabled)
         button.isEnabled = enabled
         button.setAccessibilityLabel("Model and provider: " + title)
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSButton, context: Context) -> CGSize? {
-        CGSize(width: max(70, nsView.intrinsicContentSize.width + 20), height: 30)
+        CGSize(width: nsView.intrinsicContentSize.width, height: 30)
     }
 
     @MainActor final class Coordinator: NSObject {
@@ -96,4 +87,32 @@ struct AgentModelMenu: NSViewRepresentable {
             }
         }
     }
+}
+
+/// Keep the original SwiftUI label, while the native button owns menu tracking.
+@MainActor private final class ModelMenuButton: NSButton {
+    private let label: ModelMenuLabelHost
+    init(title: String) {
+        label = ModelMenuLabelHost(rootView: DeskMenuLabel(title: title))
+        super.init(frame: .zero)
+        self.title = ""
+        isBordered = false
+        addSubview(label)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func update(title: String, enabled: Bool) {
+        label.rootView = DeskMenuLabel(title: title)
+        label.alphaValue = enabled ? 1 : 0.5
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+    override var intrinsicContentSize: NSSize { label.fittingSize }
+    override func layout() {
+        super.layout()
+        label.frame = bounds
+    }
+}
+
+@MainActor private final class ModelMenuLabelHost: NSHostingView<DeskMenuLabel> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

@@ -132,6 +132,7 @@ struct BriefReply: Identifiable {
     let markdown: String
     let date = Date()
     var provider: String? = nil
+    var incomplete = false
 }
 struct BriefPermission: Identifiable {
     let id: String
@@ -403,7 +404,7 @@ struct BriefAttachment: Identifiable {
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
                 contextUsage.compacted = records.last?.contextCompacted == true
-                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown, provider: $0.provider ?? agent) }
+                replies = BriefHistory.visibleReplies(records, provider: agent)
                 interrupted = records.last?.incomplete == true
                 if interrupted { pendingInstruction = records.last?.instruction ?? "" }
 
@@ -666,7 +667,7 @@ struct BriefAttachment: Identifiable {
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
                 contextUsage.compacted = records.last?.contextCompacted == true
-                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown, provider: $0.provider ?? agent) }
+                replies = BriefHistory.visibleReplies(records, provider: agent)
                 index = max(0, replies.count - 1)
                 interrupted = records.last?.incomplete == true
                 error = ""
@@ -1020,6 +1021,11 @@ for folder in glob.glob(os.path.join(root, '*')):
 
 enum BriefHistory {
     struct Record: Codable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int?; let contextCompacted: Bool?; var provider: String? = nil }
+    static func visibleReplies(_ records: [Record], provider: String) -> [BriefReply] {
+        records.filter { $0.incomplete != true || !$0.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { BriefReply(instruction: $0.instruction, markdown: $0.markdown,
+                             provider: $0.provider ?? provider, incomplete: $0.incomplete == true) }
+    }
     static func read(_ project: Project, id: String, agent: String = "claude") -> Result<[Record], Error> {
         if let snapshot = AgentTranscriptStore.snapshot(project, id: id, agent: agent) { return .success(snapshot.records) }
         if agent == "gemini" { return GeminiTranscriptStore.read(project, id: id) }
@@ -1039,6 +1045,7 @@ records = []
 instruction = ''
 current_id = None
 parts = {}
+last_text = ''
 has_tools = False
 stop_reason = None
 completion = False
@@ -1058,7 +1065,7 @@ def flush():
     if confirmed and not has_tools and text:
         records.append(dict(instruction=instruction[:100000], markdown=text[:150000]))
     elif not confirmed or has_tools:
-        records.append(dict(instruction=instruction[:100000], markdown='', incomplete=True))
+        records.append(dict(instruction=instruction[:100000], markdown=(text or last_text)[:150000], incomplete=True))
 
 if not files: raise RuntimeError('Saved transcript is not available.')
 f = max(files, key=os.path.getmtime)
@@ -1092,21 +1099,23 @@ for raw in data.splitlines():
             flush(); instruction = ''; continue
         flush()
         instruction = text
-        current_id = None; parts = {}; has_tools = False; stop_reason = None; completion = False
+        current_id = None; parts = {}; last_text = ''; has_tools = False; stop_reason = None; completion = False
     elif event.get('type') == 'assistant':
+        if event.get('isApiErrorMessage'):
+            has_tools = True
+            continue
         mid = message.get('id') or event.get('uuid')
         if not mid: mid = 'anonymous-' + str(len(records))
         if mid != current_id:
             current_id = mid; parts = {}; has_tools = False; stop_reason = None; completion = False
-        if event.get('isApiErrorMessage'):
-            has_tools = True
-            continue
         if message.get('stop_reason') is not None: stop_reason = message['stop_reason']
         blocks = content if isinstance(content, list) else []
         for index, block in enumerate(blocks):
             if not isinstance(block, dict): continue
             if block.get('type') == 'tool_use': has_tools = True
             if block.get('type') == 'text': parts[event.get('apiBlockIndex', 0) + index] = block.get('text', '')
+        visible_text = '\n\n'.join(parts[k] for k in sorted(parts)).strip()
+        if visible_text: last_text = visible_text
     elif event.get('type') == 'result':
         if not event.get('is_error') and not str(event.get('subtype', '')).startswith('error'):
             result = str(event.get('result') or '').strip()
@@ -1339,6 +1348,11 @@ struct BriefAgentView: View {
                     contextIndicator
                     if let reply = session.current {
                         BriefInstructionPreview(source: reply.instruction).id(reply.id)
+                        if reply.incomplete {
+                            Label("Interrupted response · may be incomplete", systemImage: "pause.circle")
+                                .font(.system(size: 11)).foregroundStyle(.orange)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 8)
+                        }
                         MarkdownPreview(source: reply.markdown, rendersTables: true, linksFilePaths: true).equatable().id(reply.id)
                             .environment(\.openURL, OpenURLAction { openFileLink($0) })
                     } else if session.historyLoadFailed && !session.running && !session.loadingHistory && !session.reloading {
@@ -1577,7 +1591,10 @@ struct BriefAgentView: View {
                         HStack(alignment: .center, spacing: 10) {
                             if session.running { ProgressView().controlSize(.small).scaleEffect(0.75) }
                             else { Circle().fill(session.error.isEmpty ? DeskStyle.running : .orange).frame(width: 6, height: 6) }
-                            Text(!session.error.isEmpty && session.status == session.error ? "Request needs attention" : session.status).font(.system(size: 12, weight: .medium))
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(!session.error.isEmpty && session.status == session.error ? "Request needs attention" : session.status)
+                                    .font(.system(size: 12, weight: .medium)).textSelection(.enabled)
+                            }
                             Spacer(minLength: 2)
                             if session.running {
                                 Button { session.stop() } label: { Image(systemName: "stop.fill").font(.system(size: 9)) }
@@ -1609,16 +1626,7 @@ struct BriefAgentView: View {
                             }.padding(12).background(DeskStyle.raised, in: RoundedRectangle(cornerRadius: 8))
                         }
                         if !session.pastActions.isEmpty {
-                            DisclosureGroup("Past actions (\(session.pastActions.count))", isExpanded: $historyExpanded) {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    ForEach(Array(session.pastActions.enumerated()), id: \.offset) { _, text in
-                                        HStack(alignment: .top, spacing: 9) {
-                                            Circle().fill(DeskStyle.muted.opacity(0.35)).frame(width: 4, height: 4).padding(.top, 5)
-                                            Text(text).font(.system(size: 11)).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
-                                        }
-                                    }
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
-                            }.font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
+                            AgentActionHistory(actions: session.pastActions, expanded: $historyExpanded)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1851,9 +1859,9 @@ extension BriefAgentModel {
     }
     private func saveGeminiTranscript(incomplete: Bool = false) {
         var records = replies.map { BriefHistory.Record(instruction: $0.instruction, markdown: $0.markdown,
-            incomplete: false, contextTokens: nil, contextWindow: nil, contextCompacted: nil, provider: $0.provider ?? agent) }
+            incomplete: $0.incomplete, contextTokens: nil, contextWindow: nil, contextCompacted: nil, provider: $0.provider ?? agent) }
         if incomplete && !pendingInstruction.isEmpty {
-            records.append(.init(instruction: pendingInstruction, markdown: "", incomplete: true,
+            records.append(.init(instruction: pendingInstruction, markdown: agent == "gemini" ? geminiAnswer : codex.answer, incomplete: true,
                 contextTokens: nil, contextWindow: nil, contextCompacted: nil))
         }
         do { try GeminiTranscriptStore.save(project, id: sessionID, title: title, records: records, agent: agent, handoff: providerHandoff, root: geminiTranscriptRoot) }

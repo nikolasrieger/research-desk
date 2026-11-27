@@ -17,6 +17,22 @@ final class OvernightSessionsTests: XCTestCase {
         XCTAssertGreaterThan(after.start, window.end)
         XCTAssertEqual(after.end.timeIntervalSince(after.start), 6 * 3600)
     }
+    func testEditableWindowKeepsLocalTimesWhenChangingZone() throws {
+        let source = try XCTUnwrap(TimeZone(identifier: "America/Vancouver"))
+        let target = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-27T20:00:00-08:00"))
+        var original = OvernightWindow.next(now: now, timeZone: source)
+        original.end = original.end.addingTimeInterval(90 * 60)
+        let changed = original.changingTimeZone(to: target)
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = target
+        XCTAssertEqual(calendar.component(.hour, from: changed.start), 1)
+        XCTAssertEqual(calendar.component(.hour, from: changed.end), 8)
+        XCTAssertEqual(calendar.component(.minute, from: changed.end), 30)
+        XCTAssertEqual(changed.zone, target.identifier)
+        XCTAssertNotEqual(changed.start, original.start)
+        XCTAssertGreaterThan(changed.end, changed.start)
+    }
+
     func testDetachedOneNightWorkerSurvivesLauncherExitWithFakeClaude() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

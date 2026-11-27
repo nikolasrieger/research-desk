@@ -67,14 +67,14 @@ root = os.environ.get('CODEX_HOME', os.path.expanduser('~/.codex'))
 files = glob.glob(os.path.join(root, 'sessions', '*', '*', '*', '*'+sys.argv[1]+'.jsonl'))
 if not files: sys.exit('Codex transcript is not available on this machine.')
 path = max(files, key=os.path.getmtime)
-records=[]; instruction=''; final=''; fallback=''; phased=False; active=False; saw_assistant=False; event_user=False; tokens=None; window=None; compacted=False
+records=[]; instruction=''; final=''; fallback=''; partial=''; phased=False; active=False; saw_assistant=False; event_user=False; tokens=None; window=None; compacted=False
 
 def flush(complete=False, message=None):
-    global instruction, final, fallback, phased, active, saw_assistant, event_user
-    answer = str(message or (final if phased else fallback)).strip()
+    global instruction, final, fallback, partial, phased, active, saw_assistant, event_user
+    answer = str(message or (final if phased else fallback) or (partial if not complete else '')).strip()
     if instruction:
-        records.append(dict(instruction=instruction[:100000], markdown=answer[:150000] if complete else '', incomplete=not complete))
-    instruction=''; final=''; fallback=''; phased=False; active=False; saw_assistant=False; event_user=False
+        records.append(dict(instruction=instruction[:100000], markdown=answer[:150000], incomplete=not complete))
+    instruction=''; final=''; fallback=''; partial=''; phased=False; active=False; saw_assistant=False; event_user=False
 
 def user_text(payload):
     content=payload.get('content', [])
@@ -124,6 +124,7 @@ for line in lines:
         elif typ=='message' and p.get('role')=='assistant':
             saw_assistant=True
             text='\n\n'.join(b.get('text','') for b in p.get('content',[]) if b.get('type')=='output_text')
+            if text.strip(): partial=text
             phase=p.get('phase')
             if phase is not None: phased=True
             if phase=='final_answer': final=text

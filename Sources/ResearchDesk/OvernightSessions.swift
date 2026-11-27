@@ -2,9 +2,18 @@ import SwiftUI
 import CryptoKit
 
 struct OvernightWindow {
-    let start: Date
-    let end: Date
-    let zone: String
+    var start: Date
+    var end: Date
+    var zone: String
+    func changingTimeZone(to zone: TimeZone) -> Self {
+        var old = Calendar(identifier: .gregorian)
+        old.timeZone = TimeZone(identifier: self.zone) ?? .current
+        var new = Calendar(identifier: .gregorian); new.timeZone = zone
+        func convert(_ date: Date) -> Date {
+            new.date(from: old.dateComponents([.year, .month, .day, .hour, .minute], from: date)) ?? date
+        }
+        return Self(start: convert(start), end: convert(end), zone: zone.identifier)
+    }
     static func next(now: Date = Date(), timeZone: TimeZone = .current) -> Self {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
@@ -69,6 +78,9 @@ enum OvernightBackend {
         return result.0
     }
     static func launch(_ project: Project, goal: OvernightGoal, instructions: String, model: String, window: OvernightWindow) throws -> OvernightJob {
+        guard window.end > window.start, window.end > Date(), TimeZone(identifier: window.zone) != nil else {
+            throw ResearchError.message("Choose a valid session window with an end later than now.")
+        }
         let config: [String: Any] = ["id": UUID().uuidString.lowercased(), "key": key(project), "project": project.path,
                                    "goal": goal.rawValue + ": " + goal.detail, "instructions": instructions,
                                    "model": model, "start": window.start.timeIntervalSince1970, "end": window.end.timeIntervalSince1970,
@@ -160,6 +172,8 @@ struct OvernightSessionsPane: View {
     @State private var instructions = ""
     @State private var selectedModel = "sonnet"
     @State private var window = OvernightWindow.next()
+    @State private var editingWindow = false
+    @State private var zoneSearch = ""
     init(project: Project) { self.project = project; _model = StateObject(wrappedValue: OvernightSessionsModel(project: project)) }
     private func jobTime(_ job: OvernightJob) -> String {
         let format = DateFormatter()
@@ -175,59 +189,151 @@ struct OvernightSessionsPane: View {
         return text
     }
 
+    private var selectedZone: TimeZone { TimeZone(identifier: window.zone) ?? .current }
+    private var validWindow: Bool { window.end > window.start && window.end > Date() }
+    private var windowTime: String {
+        let format = DateFormatter(); format.timeZone = selectedZone; format.dateFormat = "HH:mm"
+        return format.string(from: window.start) + " – " + format.string(from: window.end)
+    }
+    private var windowDate: String {
+        let format = DateFormatter(); format.timeZone = selectedZone; format.dateStyle = .medium
+        return format.string(from: window.start)
+    }
+    private var windowEditor: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Session window").font(.headline)
+            DatePicker("Start", selection: $window.start, displayedComponents: [.date, .hourAndMinute])
+            DatePicker("End", selection: $window.end, displayedComponents: [.date, .hourAndMinute])
+            Text("Timezone · " + window.zone).font(.system(size: 11, weight: .medium))
+            TextField("Find a timezone", text: $zoneSearch).textFieldStyle(DeskFieldStyle())
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(TimeZone.knownTimeZoneIdentifiers.filter { zoneSearch.isEmpty || $0.localizedCaseInsensitiveContains(zoneSearch) }, id: \.self) { identifier in
+                        Button {
+                            if let zone = TimeZone(identifier: identifier) { window = window.changingTimeZone(to: zone) }
+                        } label: {
+                            HStack {
+                                Text(identifier)
+                                Spacer()
+                                if identifier == window.zone { Image(systemName: "checkmark") }
+                            }.font(.system(size: 11)).padding(7).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }.frame(height: 160)
+            if !validWindow {
+                Text("Choose an end after the start and later than now.").font(.caption).foregroundStyle(.orange)
+            }
+            HStack { Spacer(); Button("Done") { editingWindow = false }.buttonStyle(DeskButtonStyle()) }
+        }.padding(18).frame(width: 360).environment(\.timeZone, selectedZone)
+            .background(DeskStyle.surface)
+    }
+
+    private func overnightMetric(_ title: String, value: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: symbol).font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(DeskStyle.muted)
+            Text(value).font(.system(size: 14, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+        }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).padding(16).frame(height: 76)
+            .background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("Overnight sessions").font(.system(size: 23, weight: .bold, design: .monospaced))
+                HStack(alignment: .top, spacing: 16) {
+                    Image(systemName: "moon.stars.fill")
+                        .font(.system(size: 26, weight: .light)).foregroundStyle(.indigo.opacity(0.9))
+                        .frame(width: 58, height: 58)
+                        .background(Color.indigo.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("AFTER HOURS").font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .tracking(2).foregroundStyle(DeskStyle.muted)
+                        Text("Overnight sessions").font(.system(size: 26, weight: .semibold))
+                    }
                     Spacer()
                     if model.busy { ProgressView().controlSize(.small) }
-                    Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy)
-                }.buttonStyle(DeskButtonStyle())
-                DeskEyebrow(title: "Goal")
-                DeskChoiceMenu(title: goal.rawValue, choices: OvernightGoal.allCases.map(\.rawValue), selection: goal.rawValue) {
-                    if let value = OvernightGoal(rawValue: $0) { goal = value }
+                    Button { Task { await model.refresh() } } label: { Image(systemName: "arrow.clockwise") }
+                        .help("Refresh sessions").accessibilityLabel("Refresh sessions").disabled(model.busy)
+                }.buttonStyle(DeskButtonStyle()).padding(.bottom, 8)
+                HStack(spacing: 12) {
+                    Button { editingWindow = true } label: {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Label("WINDOW", systemImage: "moon")
+                                Spacer()
+                                Image(systemName: "pencil")
+                            }.font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(DeskStyle.muted)
+                            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                                Text(windowTime).font(.system(size: 14, weight: .semibold))
+                                Text(selectedZone.abbreviation(for: window.start) ?? window.zone)
+                                    .font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
+                            }.lineLimit(1)
+                        }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).padding(16).frame(height: 76)
+                            .background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+                            .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(DeskStyle.edge, lineWidth: 0.5) }
+                    }.buttonStyle(.plain).frame(minWidth: 0, maxWidth: .infinity)
+                        .help("Edit session time and timezone · " + window.zone)
+                        .popover(isPresented: $editingWindow) { windowEditor }
+                    overnightMetric("WORKER", value: project.isRemote ? project.host : "This Mac", symbol: "desktopcomputer")
+                    overnightMetric("DAILY BUDGET", value: "14.29 points", symbol: "gauge.with.dots.needle.33percent")
                 }
-                Text(goal.detail).font(.callout).foregroundStyle(DeskStyle.muted)
-                TextField("Additional instructions or questions to investigate", text: $instructions, axis: .vertical)
-                    .lineLimit(3...8).textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(DeskStyle.surface)
-                    .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
-                DeskEyebrow(title: "Model")
-                DeskChoiceMenu(title: selectedModel.capitalized, choices: ["Sonnet", "Opus", "Haiku"], selection: selectedModel.capitalized) {
-                    selectedModel = $0.lowercased()
-                }
-                VStack(alignment: .leading, spacing: 7) {
-                    Label("1–7 a.m. · " + window.zone, systemImage: "moon")
-                    Text(window.start.formatted(date: .abbreviated, time: .shortened) + " – " + window.end.formatted(date: .abbreviated, time: .shortened))
-                    DisclosureGroup("Schedule and budget details") {
-                    Text("Runs on " + (project.isRemote ? project.host : "this Mac") + ". The window is saved as absolute times; the machine's timezone does not change it.")
-                    Text("Requires Python 3 and Claude Code signed in with a subscription on that machine.")
-                    Text("Budget: 14.29 percentage points of weekly usage per day, paced from the weekly reset and including usage already spent. Stops 1 point early; small batches and minute-by-minute checks limit overshoot. Exact enforcement is not supported by Claude's delayed usage meter.")
-                    Text("Produces Markdown reports using read/search tools. Project files are not edited. Session limits pause work; missing quota data blocks it. One worker per machine account can run at a time.")
-                    if !project.isRemote { Text("This Mac must stay on and awake during the window.").foregroundStyle(.orange) }
-                    }.padding(.top, 8)
-                }.font(.system(size: 11, design: .monospaced)).foregroundStyle(DeskStyle.muted)
-                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(DeskStyle.surface)
-                    .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
-                Button("Arm this night", systemImage: "moon.stars") {
-                    // Only this explicit action installs and starts a detached, one-shot worker.
-                    let captured = OvernightWindow.next()
-                    window = captured
-                    Task { await model.launch(goal: goal, instructions: instructions, model: selectedModel, window: captured) }
-                }.buttonStyle(DeskButtonStyle(prominent: true))
-                    .disabled(model.busy || model.jobs.contains(where: \.active) || (goal == .custom && instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("Plan your night").font(.system(size: 16, weight: .semibold))
+                        Spacer()
+                        Text(windowDate)
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(DeskStyle.muted)
+                    }
+                    DeskEyebrow(title: "Research goal")
+                    DeskChoiceMenu(title: goal.rawValue, choices: OvernightGoal.allCases.map(\.rawValue), selection: goal.rawValue) {
+                        if let value = OvernightGoal(rawValue: $0) { goal = value }
+                    }
+                    Text(goal.detail).font(.callout).foregroundStyle(DeskStyle.muted)
+                    TextField("Additional instructions or questions to investigate", text: $instructions, axis: .vertical)
+                        .lineLimit(3...8).textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(DeskStyle.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(DeskStyle.edge, lineWidth: 1) }
+                    DeskEyebrow(title: "Model")
+                    DeskChoiceMenu(title: selectedModel.capitalized, choices: ["Sonnet", "Opus", "Haiku"], selection: selectedModel.capitalized) {
+                        selectedModel = $0.lowercased()
+                    }
+                    Button("Arm this night", systemImage: "moon.stars") {
+                        // Only this explicit action installs and starts a detached, one-shot worker.
+                        let captured = window
+                        Task { await model.launch(goal: goal, instructions: instructions, model: selectedModel, window: captured) }
+                    }.buttonStyle(DeskButtonStyle(prominent: true))
+                        .disabled(model.busy || !validWindow || model.jobs.contains(where: \.active) || (goal == .custom && instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                }.padding(20)
+                    .background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(DeskStyle.edge, lineWidth: 1) }
                 if !model.error.isEmpty { DeskErrorBanner(message: model.error, title: "Overnight session needs attention", onDismiss: { model.error = "" }) }
-                Divider()
+                HStack {
+                    Text("Session journal").font(.system(size: 17, weight: .semibold))
+                    Text("\(model.jobs.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(DeskStyle.muted)
+                    Spacer()
+                }.padding(.top, 10)
+                if model.jobs.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "moon.zzz").font(.system(size: 26, weight: .light))
+                        Text("Quiet night so far").font(.system(size: 13, weight: .medium))
+                    }.foregroundStyle(DeskStyle.muted).frame(maxWidth: .infinity).padding(30)
+                        .background(DeskStyle.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+                }
                 ForEach(model.jobs) { job in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(job.goal.components(separatedBy: ":").first ?? job.goal).font(.system(size: 13, weight: .bold, design: .monospaced))
                             Spacer()
-                            Text(job.status.uppercased()).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(job.status == "blocked" ? Color.orange : DeskStyle.muted)
+                            Label(job.status.capitalized, systemImage: job.active ? "circle.fill" : "circle")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(job.status == "blocked" ? Color.orange : job.active ? DeskStyle.running : DeskStyle.muted)
+                                .padding(.horizontal, 9).padding(.vertical, 5)
+                                .background(DeskStyle.raised, in: Capsule())
                             if job.active { Button("Cancel") { Task { await model.cancel(job) } } }
                             Button("View report") { Task { await model.openReport(job) } }
                         }.buttonStyle(DeskButtonStyle(compact: true)).disabled(model.busy)
@@ -236,9 +342,15 @@ struct OvernightSessionsPane: View {
                         Text(jobTime(job)).font(.caption).foregroundStyle(DeskStyle.muted)
                         if job.used != nil { Text(quotaSummary(job)).font(.caption.monospaced()).foregroundStyle(DeskStyle.muted) }
 
-                        Text(job.folder).font(.caption2.monospaced()).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
-                    }.padding(14).background(DeskStyle.surface)
-                        .overlay { Rectangle().strokeBorder(DeskStyle.edge, lineWidth: 1) }
+                        HStack(spacing: 14) {
+                            if let batches = job.batches { Label("\(batches) batches", systemImage: "square.stack.3d.up") }
+                            if let spent = job.spent { Label(String(format: "%.1f points used", spent), systemImage: "gauge.with.dots.needle.33percent") }
+                        }.font(.system(size: 11)).foregroundStyle(DeskStyle.muted)
+                        DisclosureGroup("Report location") {
+                            Text(job.folder).font(.caption2.monospaced()).foregroundStyle(DeskStyle.muted).textSelection(.enabled)
+                        }.font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
+                    }.padding(18).background(DeskStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(DeskStyle.edge, lineWidth: 1) }
                 }
                 if !model.report.isEmpty {
                     HStack { DeskEyebrow(title: "Report"); Spacer(); Button("Close") { model.report = "" }.buttonStyle(DeskButtonStyle(compact: true)) }
@@ -247,7 +359,6 @@ struct OvernightSessionsPane: View {
             }.padding(24).frame(maxWidth: 900, alignment: .leading).frame(maxWidth: .infinity)
         }.background(DeskStyle.background)
             .task {
-                window = OvernightWindow.next()
                 await model.refresh()
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(30)) } catch { break }

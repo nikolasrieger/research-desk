@@ -135,7 +135,9 @@ print(json.dumps({'type':'result','result':'Finished'}), flush=True)
             ["type": "user", "message": ["content": "Empty turn"]],
             ["type": "assistant", "message": ["id": "empty", "stop_reason": "end_turn", "content": [["type": "text", "text": " "]]]],
             ["type": "user", "message": ["content": "Unfinished follow-up"]],
-            ["type": "assistant", "message": ["content": [["type": "text", "text": "Still checking"], ["type": "tool_use", "name": "Bash"]]]]
+            ["type": "assistant", "message": ["content": [["type": "text", "text": "Still checking"], ["type": "tool_use", "name": "Bash"]]]],
+            ["type": "assistant", "message": ["id": "tool-only", "content": [["type": "tool_use", "name": "Read"]]]],
+            ["type": "assistant", "isApiErrorMessage": true, "message": ["id": "api-error", "content": [["type": "text", "text": "Connection failed"]]]]
         ]
         let data = try records.reduce(into: Data()) { result, item in
             result.append(try JSONSerialization.data(withJSONObject: item)); result.append(10)
@@ -148,6 +150,10 @@ print(json.dumps({'type':'result','result':'Finished'}), flush=True)
         XCTAssertEqual(history.count, 2)
         XCTAssertTrue(history.last?.incomplete == true)
         XCTAssertEqual(history.last?.instruction, "Unfinished follow-up")
+        XCTAssertEqual(history.last?.markdown, "Still checking")
+        let visible = BriefHistory.visibleReplies(history, provider: "claude")
+        XCTAssertEqual(visible.map(\.markdown), ["Final finding", "Still checking"])
+        XCTAssertEqual(visible.map(\.incomplete), [false, true])
         XCTAssertEqual(history.first?.instruction, "Investigate")
         XCTAssertEqual(history.first?.markdown, "Final finding")
     }

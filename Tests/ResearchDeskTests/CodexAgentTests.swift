@@ -182,7 +182,7 @@ for line in sys.stdin:
         XCTAssertEqual(result.2, 0, result.1)
         let records = try JSONDecoder().decode([BriefHistory.Record].self, from: Data(result.0.utf8))
         XCTAssertEqual(records.map(\.instruction), ["First question", "Second question", "Unfinished question"])
-        XCTAssertEqual(records.map(\.markdown), ["First final", "Second final", ""])
+        XCTAssertEqual(records.map(\.markdown), ["First final", "Second final", "Still working"])
         XCTAssertEqual(records.last?.incomplete, true)
     }
 
@@ -200,7 +200,12 @@ for line in sys.stdin:
             ["type": "event_msg", "payload": ["type": "task_complete"]],
             ["type": "event_msg", "payload": ["type": "token_count", "info": ["last_token_usage": ["total_tokens": 160000], "model_context_window": 200000]]],
             ["type": "compacted", "payload": ["message": "Summary"]],
-            ["type": "event_msg", "payload": ["type": "user_message", "message": "Unfinished"]]
+            ["type": "event_msg", "payload": ["type": "user_message", "message": "Unfinished"]],
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": "final_answer", "content": [["type": "output_text", "text": "Response before interrupt"]]]],
+            ["type": "event_msg", "payload": ["type": "turn_aborted"]],
+            ["type": "event_msg", "payload": ["type": "user_message", "message": "Disconnected"]],
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": "commentary", "content": [["type": "output_text", "text": "Last visible update"]]]],
+            ["type": "response_item", "payload": ["type": "function_call", "name": "exec_command"]]
         ]
         let data = try events.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }.joined(separator: "\n")
         try data.write(to: directory.appendingPathComponent("rollout-" + id + ".jsonl"), atomically: true, encoding: .utf8)
@@ -208,8 +213,14 @@ for line in sys.stdin:
         let result = Command.run("/bin/zsh", ["-c", command])
         XCTAssertEqual(result.2, 0, result.1)
         let records = try JSONDecoder().decode([BriefHistory.Record].self, from: Data(result.0.utf8))
-        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.count, 3)
         XCTAssertEqual(records[0].markdown, "Final answer")
+        XCTAssertEqual(records[1].markdown, "Response before interrupt")
+        XCTAssertEqual(records[2].markdown, "Last visible update")
+        XCTAssertEqual(records[2].incomplete, true)
+        let visible = BriefHistory.visibleReplies(records, provider: "codex")
+        XCTAssertEqual(visible.map(\.markdown), ["Final answer", "Response before interrupt", "Last visible update"])
+        XCTAssertEqual(visible.map(\.incomplete), [false, true, true])
         XCTAssertEqual(records[1].incomplete, true)
         XCTAssertEqual(records[1].instruction, "Unfinished")
         XCTAssertNil(records.last?.contextTokens)

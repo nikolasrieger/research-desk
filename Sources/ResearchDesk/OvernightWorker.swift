@@ -183,7 +183,7 @@ def run(folder):
                 reason = None
                 while process.poll() is None:
                     if (folder / 'cancel').exists(): reason = ('cancelled', 'Cancelled by you.'); break
-                    if time.time() >= config['end']: reason = ('finished', 'The 7 a.m. deadline has been reached.'); break
+                    if time.time() >= config['end']: reason = ('finished', 'The scheduled deadline has been reached.'); break
                     if time.time()-checked >= POLL:
                         reading = usage(); checked = time.time()
                         state.update(used=reading['weekly'], spent=max(0, reading['weekly']-initial), sessionUsed=reading['session']); save(folder, state)
@@ -203,7 +203,7 @@ def run(folder):
             state.update(status='waiting', message='Batch saved. Waiting for the next quota check.'); save(folder, state)
             while time.time()-checked < POLL and time.time() < config['end'] and not (folder/'cancel').exists(): time.sleep(1)
             checked = 0
-        else: state.update(status='finished', message='The 7 a.m. deadline has been reached.')
+        else: state.update(status='finished', message='The scheduled deadline has been reached.')
     except Exception as error:
         # No credential payloads or HTTP response bodies are included in status/log output.
         state.update(status='blocked', message=str(error)[:2000])
