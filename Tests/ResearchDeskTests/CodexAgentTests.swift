@@ -29,6 +29,8 @@ final class CodexAgentTests: XCTestCase {
 #!/usr/bin/env python3
 import sys,json,os
 turn=0
+assert 'approvals_reviewer="auto_review"' in sys.argv
+assert 'approval_policy="on-request"' in sys.argv
 
 def emit(o): print(json.dumps(o),flush=True)
 def finish():
@@ -38,7 +40,11 @@ for line in sys.stdin:
     e=json.loads(line); m=e.get('method'); rid=e.get('id')
     if m=='initialize': emit({'id':rid,'result':{}})
     elif m=='model/list': emit({'id':rid,'result':{'data':[{'id':'test-model','model':'test-model','displayName':'Test model'}]}})
-    elif m in ('thread/start','thread/resume'): emit({'id':rid,'result':{'thread':{'id':THREAD},'model':'test-model'}})
+    elif m in ('thread/start','thread/resume'):
+        assert e['params']['approvalPolicy']=='on-request'
+        assert e['params']['sandbox']=='workspace-write'
+        assert e['params']['approvalsReviewer']=='auto_review'
+        emit({'id':rid,'result':{'thread':{'id':THREAD},'model':'test-model'}})
     elif m=='turn/start':
         assert ('<research-desk-job-registration>' in e['params']['input'][0]['text']) == (turn==0)
         turn+=1
@@ -75,6 +81,109 @@ for line in sys.stdin:
         let secondPID = chat.replies[1].markdown.components(separatedBy: " pid ").last
         XCTAssertEqual(firstPID, secondPID)
         XCTAssertTrue(chat.modelOptions.contains { $0.id == "test-model" })
+    }
+
+    @MainActor
+    func testModelDiscoveryBeforeSendingWithPaginationAndRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("codex")
+        let source = #"""
+#!/usr/bin/env python3
+import sys,json,os
+
+def emit(o): print(json.dumps(o),flush=True)
+for line in sys.stdin:
+    e=json.loads(line); m=e.get('method'); rid=e.get('id')
+    if m=='initialize': emit({'id':rid,'result':{}})
+    elif m=='initialized': pass
+    elif m=='model/list':
+        if os.path.exists('fail-models'):
+            emit({'id':rid,'error':{'code':-32600,'message':'Please sign in on this machine'}})
+        elif e['params'].get('cursor')=='second':
+            emit({'id':rid,'result':{'data':[{'model':'first','displayName':'Duplicate'},{'id':'second','displayName':'Second model'},{'model':'bad model'}],'nextCursor':None}})
+        else:
+            emit({'id':rid,'result':{'data':[{'model':'first','displayName':'First model'}],'nextCursor':'second'}})
+    else:
+        open('unexpected-request','w').write(str(m))
+        sys.exit(1)
+"""#
+        try source.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let chat = BriefAgentModel(project: Project(name: "Models", path: root.path), executableOverride: executable.path, agent: "codex")
+        let originalSession = chat.sessionID
+        chat.instruction = "Unsent draft"
+        await chat.refreshModels()
+        XCTAssertEqual(chat.modelOptions.map(\.id), ["", "first", "second"])
+        XCTAssertEqual(chat.modelOptions.map(\.name), ["Default", "First model", "Second model"])
+        XCTAssertTrue(chat.modelLoadError.isEmpty)
+        XCTAssertFalse(chat.loadingModels)
+        XCTAssertFalse(chat.running)
+        XCTAssertFalse(chat.hasStoredSession)
+        XCTAssertTrue(chat.replies.isEmpty)
+        XCTAssertEqual(chat.instruction, "Unsent draft")
+        XCTAssertEqual(chat.sessionID, originalSession)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("unexpected-request").path))
+
+        chat.chooseModel("second")
+        let failure = root.appendingPathComponent("fail-models")
+        try Data().write(to: failure)
+        await chat.refreshModels()
+        XCTAssertTrue(chat.modelLoadError.contains("Please sign in"))
+        XCTAssertEqual(chat.modelOptions.map(\.id), ["", "first", "second"])
+        XCTAssertEqual(chat.selectedModel, "second")
+        XCTAssertFalse(chat.loadingModels)
+
+        try FileManager.default.removeItem(at: failure)
+        await chat.refreshModels()
+        XCTAssertTrue(chat.modelLoadError.isEmpty)
+        XCTAssertEqual(chat.selectedModel, "second")
+        XCTAssertEqual(chat.modelOptions.count, 3)
+    }
+
+    func testHistoryRestoresAppServerTurnsWithoutUserMessageEvents() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("sessions/2026/11/27")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let id = UUID().uuidString
+        func user(_ text: String, kind: String = "user.text") -> [String: Any] {
+            ["type": "response_item", "payload": ["type": "message", "role": "user",
+                "content": [["type": "input_text", "text": text]],
+                "internal_chat_message_metadata_passthrough": ["content_item_kinds": [kind]]]]
+        }
+        func answer(_ text: String, phase: String) -> [String: Any] {
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": phase,
+                "content": [["type": "output_text", "text": text]]]]
+        }
+        let events: [[String: Any]] = [
+            ["type": "event_msg", "payload": ["type": "task_started"]],
+            user("Environment details", kind: "environments.environment_context"),
+            user("Page metadata", kind: "additional_content.codex_apps_open_page"),
+            user("First question"),
+            answer("Working", phase: "commentary"),
+            answer("First final", phase: "final_answer"),
+            ["type": "event_msg", "payload": ["type": "task_complete"]],
+            ["type": "event_msg", "payload": ["type": "task_started"]],
+            user("Second question"),
+            // Older transcripts can include both representations of the same user message.
+            ["type": "event_msg", "payload": ["type": "user_message", "message": "Second question"]],
+            answer("Second final", phase: "final_answer"),
+            ["type": "event_msg", "payload": ["type": "task_complete"]],
+            ["type": "event_msg", "payload": ["type": "task_started"]],
+            user("Unfinished question"),
+            answer("Still working", phase: "commentary")
+        ]
+        let text = try events.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }.joined(separator: "\n")
+        try text.write(to: directory.appendingPathComponent("rollout-" + id + ".jsonl"), atomically: true, encoding: .utf8)
+        let command = "CODEX_HOME=" + Command.shellQuote(root.path) + " python3 -c " + Command.shellQuote(CodexHistory.script) + " " + Command.shellQuote(id)
+        let result = Command.run("/bin/zsh", ["-c", command])
+        XCTAssertEqual(result.2, 0, result.1)
+        let records = try JSONDecoder().decode([BriefHistory.Record].self, from: Data(result.0.utf8))
+        XCTAssertEqual(records.map(\.instruction), ["First question", "Second question", "Unfinished question"])
+        XCTAssertEqual(records.map(\.markdown), ["First final", "Second final", ""])
+        XCTAssertEqual(records.last?.incomplete, true)
     }
 
     func testCodexHistoryIncludesFinalsAndInterruptedRequest() throws {

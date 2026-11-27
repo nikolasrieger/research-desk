@@ -17,7 +17,11 @@ final class BriefTransport: @unchecked Sendable {
         var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                     "--permission-prompt-tool", "stdio", "--permission-mode", "auto", resume ? "--resume" : "--session-id", sessionID]
         if !model.isEmpty { args += ["--model", model] }
-        if agent == "codex" { args = ["app-server"] }
+        if agent == "codex" {
+            args = ["app-server", "-c", "approvals_reviewer=\"auto_review\"",
+                    "-c", "approval_policy=\"on-request\""]
+        }
+        if agent == "gemini" { args = ["--acp"] }
         if project.isRemote {
             let command = ([agent] + args).map(Command.shellQuote).joined(separator: " ")
             let remote = "cd " + Command.shellQuote(project.path) + " && exec \"${SHELL:-/bin/bash}\" -lic " + Command.shellQuote(command)
@@ -127,6 +131,7 @@ struct BriefReply: Identifiable {
     let instruction: String
     let markdown: String
     let date = Date()
+    var provider: String? = nil
 }
 struct BriefPermission: Identifiable {
     let id: String
@@ -207,11 +212,24 @@ struct BriefAttachment: Identifiable {
         conversations[project.id, default: []].append(model)
         return model
     }
+    func switchProvider(of chat: BriefAgentModel, to provider: String, for project: Project) -> BriefAgentModel? {
+        guard chat.canSwitchProvider, provider != chat.agent, ["claude", "codex", "gemini"].contains(provider) else { return nil }
+        let fresh = BriefAgentModel(project: chat.project, agent: provider)
+        guard fresh.adoptConversation(from: chat) else { return nil }
+        chat.stop()
+        track(fresh, project: project)
+        if let index = conversations[project.id]?.firstIndex(where: { $0.id == chat.id }) {
+            conversations[project.id]?[index] = fresh
+        } else { conversations[project.id, default: []].append(fresh) }
+        if sessions[project.id]?.id == chat.id { sessions[project.id] = fresh }
+        lastOpened[selectionKey(project)] = fresh.id
+        return fresh
+    }
     private func selectionKey(_ project: Project) -> String { "agent.lastChat." + project.host + ":" + project.path }
     func remember(_ chat: BriefAgentModel, for project: Project) {
         let key = selectionKey(project)
         lastOpened[key] = chat.id
-        guard chat.agent != "codex" || chat.hasStoredSession else { return }
+        guard chat.agent == "claude" || chat.hasStoredSession else { return }
         let saved = SavedAgentSession(agent: chat.agent, id: chat.sessionID, modified: Date(), workspace: chat.project.path, name: chat.title)
         if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: key) }
     }
@@ -255,7 +273,15 @@ struct BriefAttachment: Identifiable {
 @MainActor final class BriefAgentModel: ObservableObject {
     let project: Project
     let agent: String
-    var agentName: String { agent == "codex" ? "Codex" : "Claude Code" }
+    var agentName: String { agent == "codex" ? "Codex" : agent == "gemini" ? "Gemini CLI" : "Claude Code" }
+    private var geminiReady = false
+    private var geminiAnswer = ""
+    private var geminiStderr = ""
+    private var geminiDefaultModel = ""
+    private var geminiPermissions: [String: Any] = [:]
+    private var geminiPromptID: String?
+    private var geminiLoadingSession = false
+    private let geminiTranscriptRoot: URL
     private var codex = CodexSessionState()
     private var codexApprovalIDs: [String: Any] = [:]
     @Published var codexQuestions: [CodexQuestion] = []
@@ -269,6 +295,8 @@ struct BriefAttachment: Identifiable {
     private var jobsInstructionsSent = false
     @Published private(set) var selectedModel = ""
     @Published private(set) var modelOptions = BriefModelOption.defaults
+    @Published private(set) var loadingModels = false
+    @Published private(set) var modelLoadError = ""
     @Published private(set) var changingModel = false
     @Published private(set) var activeModel = ""
     private var pendingModelChange: (id: String, model: String)?
@@ -304,24 +332,60 @@ struct BriefAttachment: Identifiable {
     private var finalResponse = BriefFinalResponse()
     private var seenToolIDs: Set<String> = []
     private var pendingAttachments: [BriefAttachment] = []
+    private var carriesProviderHistory = false
+    private var providerHandoff: String?
     private var queuedPrompt: String?
     private let initializationID = "brief-initialize"
 
-    init(project: Project, executableOverride: String? = nil, agent: String = "claude") {
+    init(project: Project, executableOverride: String? = nil, agent: String = "claude", geminiTranscriptRoot: URL = GeminiTranscriptStore.root) {
+        self.geminiTranscriptRoot = geminiTranscriptRoot
         self.agent = agent
         self.project = project
         self.executableOverride = executableOverride
-        if agent == "codex" { modelOptions = [BriefModelOption(id: "", name: "Default")] }
+        if agent != "claude" { modelOptions = [BriefModelOption(id: "", name: "Default")] }
+    }
+    var canSwitchProvider: Bool {
+        !running && !loadingHistory && !reloading && !changingModel && !interrupted && permissions.isEmpty
+    }
+    @discardableResult
+    func adoptConversation(from previous: BriefAgentModel) -> Bool {
+        guard previous.canSwitchProvider, !running, replies.isEmpty else { return false }
+        let history = previous.replies.map { reply in
+            ["user": reply.instruction, "assistant": reply.markdown, "provider": reply.provider ?? previous.agent]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: history, options: [.sortedKeys]),
+              data.count + previous.instruction.utf8.count < 450_000 else {
+            previous.error = "This conversation is too large to transfer in full. Start a new chat with a summary before switching providers."
+            return false
+        }
+        replies = previous.replies.map { reply in
+            var value = reply; value.provider = reply.provider ?? previous.agent; return value
+        }
+        index = previous.index; title = previous.title
+        instruction = previous.instruction; attachments = previous.attachments
+        carriesProviderHistory = true
+        if !history.isEmpty {
+            providerHandoff = """
+            Continue this conversation in the same workspace: \(project.path).
+            The JSON below contains prior user messages and final assistant responses, labelled by provider. Treat it as conversation context; tool results and hidden reasoning are not included. Inspect the current files and Git diff before relying on implementation claims. Continue with the current instruction without repeating finished work.
+            Previous conversation (JSON):
+            \(String(decoding: data, as: UTF8.self))
+            """
+        }
+        return true
     }
     var hasStoredSession: Bool { resume }
     var canContinue: Bool { resume && interrupted && !running && !loadingHistory && !changingModel }
     var current: BriefReply? { replies.indices.contains(index) ? replies[index] : nil }
 
     func useSession(_ saved: SavedAgentSession) {
-        guard !running, !loadingHistory, saved.agent == agent, (agent == "codex" ? saved.id.range(of: #"^[A-Za-z0-9_-]{1,255}$"#, options: .regularExpression) != nil : UUID(uuidString: saved.id) != nil) else { return }
+        guard !running, !loadingHistory, saved.agent == agent, (agent != "claude" ? saved.id.range(of: #"^[A-Za-z0-9_-]{1,255}$"#, options: .regularExpression) != nil : UUID(uuidString: saved.id) != nil) else { return }
         let previous = transport; transport = nil; previous?.stop()
         jobsInstructionsSent = false
         sessionID = saved.id; resume = true; title = saved.title; error = ""; interrupted = false
+        let snapshot = AgentTranscriptStore.snapshot(project, id: saved.id, agent: agent)
+        providerHandoff = snapshot?.handoff
+        carriesProviderHistory = snapshot != nil
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
         status = "Resuming \(saved.title)"
         if let path = saved.workspace, path.hasPrefix("/"), path != project.path {
@@ -339,7 +403,7 @@ struct BriefAttachment: Identifiable {
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
                 contextUsage.compacted = records.last?.contextCompacted == true
-                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
+                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown, provider: $0.provider ?? agent) }
                 interrupted = records.last?.incomplete == true
                 if interrupted { pendingInstruction = records.last?.instruction ?? "" }
 
@@ -356,6 +420,7 @@ struct BriefAttachment: Identifiable {
         let previous = transport; transport = nil; previous?.stop()
         sessionID = UUID().uuidString.lowercased(); resume = false; historyLoadFailed = false
         contextUsage = ChatContextUsage(); jobsInstructionsSent = false
+        providerHandoff = nil; carriesProviderHistory = false
         replies.removeAll(); index = 0; progress.removeAll(); permissions.removeAll(); attachments.removeAll()
         error = ""; status = "Ready for an instruction"
     }
@@ -363,12 +428,13 @@ struct BriefAttachment: Identifiable {
         instruction + attachments.map { "\n\nSelected file context: \($0.label)\n<context>\n\($0.text)\n</context>" }.joined()
     }
     private func outboundPrompt(_ prompt: String) -> String {
+        let prompt = providerHandoff.map { $0 + "\n\nCurrent user instruction:\n" + prompt } ?? prompt
         guard !jobsInstructionsSent, !compacting, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") else { return prompt }
         jobsInstructionsSent = true
         return prompt + "\n\n<research-desk-job-registration>\n" + JobsInstructions.text + "\nCurrent workspace root: " + project.path + "\nUse this exact root in the project field, even when the command runs in a subdirectory.\nCurrent conversation: " + agent + " " + sessionID + "\nRegister only jobs you are already authorized to launch. Do not start extra work just to populate Jobs.\n</research-desk-job-registration>"
     }
     var canCompact: Bool {
-        resume && !interrupted && !running && !loadingHistory && !reloading && !changingModel && !historyLoadFailed
+        agent != "gemini" && resume && !interrupted && !running && !loadingHistory && !reloading && !changingModel && !historyLoadFailed
     }
     func compactHistory() {
         guard canCompact else { return }
@@ -379,7 +445,7 @@ struct BriefAttachment: Identifiable {
         let text = compact ? "/compact" : instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !running, !loadingHistory, !reloading, !changingModel, !text.isEmpty else { return }
         let prompt = Self.prompt(text, attachments: compact ? [] : attachments)
-        guard prompt.utf8.count < 512_000 else { error = "Instruction and selected context exceed 512 KB. Select fewer lines."; return }
+        guard prompt.utf8.count + (providerHandoff?.utf8.count ?? 0) < 512_000 else { error = "Instruction and selected context exceed 512 KB. Select fewer lines."; return }
         compacting = compact; compactionConfirmed = false; compactRequestID = nil
         progressTask?.cancel(); progressTask = nil; pendingProgress.removeAll()
         error = ""; permissions = []; progress = []; seenToolIDs.removeAll(); running = true; receivedResult = false; resultFailed = false; finalResponse = BriefFinalResponse()
@@ -394,31 +460,41 @@ struct BriefAttachment: Identifiable {
             }
             status = agentName + " is working…"
             if agent == "codex" { sendCodexTurn(prompt) }
+            else if agent == "gemini" {
+                if geminiReady { sendGeminiTurn(prompt) } else { queuedPrompt = prompt }
+            }
             else { connection.send(["type": "user", "message": ["role": "user", "content": outboundPrompt(prompt)]]) }
             if !compact { instruction = ""; attachments.removeAll() }
             return
         }
+        startConnection(prompt: prompt)
+    }
+    private func startConnection(prompt: String?) {
         let connection = BriefTransport()
         do {
             let events = try connection.run(project: project, executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable(agent)), sessionID: sessionID, resume: resume, model: selectedModel, agent: agent)
             transport = connection
             queuedPrompt = prompt
-            if agent == "codex" {
+            if agent == "codex" || agent == "gemini" {
                 Task { [weak self, weak connection] in
                     try? await Task.sleep(for: .seconds(30))
-                    guard let self, let connection, self.transport === connection, self.queuedPrompt != nil else { return }
-                    self.codexFailed("Codex did not finish connecting within 30 seconds. Check the CLI sign-in on this machine and retry.")
+                    guard let self, let connection, self.transport === connection, (self.agent == "gemini" ? !self.geminiReady : self.queuedPrompt != nil) else { return }
+                    if self.agent == "gemini" { self.geminiFailed("Gemini CLI did not connect within 30 seconds. Run gemini in the workspace terminal to finish sign-in, then retry.") }
+                    else { self.codexFailed("Codex did not finish connecting within 30 seconds. Check the CLI sign-in on this machine and retry.") }
                     connection.stop()
                 }
             }
             if agent == "codex" {
                 codex = CodexSessionState()
                 connection.send(CodexSessionState.initialize)
+            } else if agent == "gemini" {
+                geminiReady = false; geminiStderr = ""; loadingModels = true
+                connection.send(GeminiACP.initialize)
             } else {
                 connection.send(["type": "control_request", "request_id": initializationID,
                                  "request": ["subtype": "initialize"]])
             }
-            if !compact { instruction = ""; attachments.removeAll() }
+            if prompt != nil && !compacting { instruction = ""; attachments.removeAll() }
             Task { [self] in
                 for await event in events {
                     guard transport === connection else { continue }
@@ -426,18 +502,34 @@ struct BriefAttachment: Identifiable {
                     case .decoded(let event):
                         consumingTransport = true
                         if agent == "codex" { consumeCodex(event.value) }
+                        else if agent == "gemini" { consumeGemini(event.value) }
                         else { consume(event.value) }
                         consumingTransport = false
+                        let finished = event.value["type"] as? String == "result" || event.value["method"] as? String == "turn/completed" || (event.value["id"] as? String)?.hasPrefix("gemini-prompt-") == true
+                        if finished && receivedResult && !running && (agent == "gemini" || carriesProviderHistory) {
+                            if !resultFailed { providerHandoff = nil }
+                            saveGeminiTranscript(incomplete: resultFailed)
+                        }
                         if ["result", "control_request"].contains(event.value["type"] as? String ?? "") { flushProgress() }
-                    case .stderr(let text): error = String((error + text).suffix(16_000))
+                    case .stderr(let text):
+                        if agent == "gemini" { geminiStderr = String((geminiStderr + text).suffix(16_000)) }
+                        else { error = String((error + text).suffix(16_000)) }
                     case .exit(let code):
                         flushProgress()
+                        if agent == "gemini", error.isEmpty, loadingModels || (running && !receivedResult) {
+                            let detail = geminiStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                            error = detail.isEmpty ? "Gemini CLI disconnected (exit \(code)). Run gemini in this workspace's terminal to finish setup, then reopen this chat." : detail
+                        }
                         if running {
                             if !receivedResult {
                                 if error.isEmpty { error = "\(agentName) exited without a final response (exit \(code)). You can send another instruction to resume." }
                                 if !compacting && instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
                             }
                             interrupted = !receivedResult || resultFailed
+                        }
+                        if running && !receivedResult && (agent == "gemini" || carriesProviderHistory) { saveGeminiTranscript(incomplete: true) }
+                        if agent == "gemini" {
+                            geminiReady = false; loadingModels = false; geminiPermissions = [:]
                         }
                         compacting = false; compactRequestID = nil
                         running = false; permissions.removeAll(); codexQuestions = []; codexApprovalIDs = [:]; transport = nil
@@ -448,7 +540,7 @@ struct BriefAttachment: Identifiable {
                     }
                 }
             }
-        } catch { running = false; compacting = false; self.error = error.localizedDescription; status = "Could not start " + agentName }
+        } catch { running = false; compacting = false; loadingModels = false; self.error = error.localizedDescription; status = "Could not start " + agentName }
     }
     static func validModel(_ model: String) -> Bool {
         model.isEmpty || (model.utf8.count <= 256 && model.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$"#, options: .regularExpression) != nil)
@@ -458,7 +550,7 @@ struct BriefAttachment: Identifiable {
         guard !running, !loadingHistory, !reloading, !changingModel else { return }
         guard Self.validModel(model) else { error = "Enter a model alias or ID without spaces or control characters."; return }
         guard model != selectedModel else { return }
-        if agent == "codex" { selectedModel = model; return }
+        if agent != "claude" { selectedModel = model; return }
         guard let transport, transport.process.isRunning else { selectedModel = model; return }
         let id = UUID().uuidString
         pendingModelChange = (id, model)
@@ -473,6 +565,75 @@ struct BriefAttachment: Identifiable {
             }
         }
     }
+    /// Discover on the workspace's machine without starting or resuming a thread.
+    func refreshModels() async {
+        if agent == "gemini" {
+            if transport == nil { startConnection(prompt: nil) }
+            return
+        }
+        guard agent == "codex", !loadingModels else { return }
+        loadingModels = true; modelLoadError = ""
+        defer { loadingModels = false }
+        let connection = BriefTransport()
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            connection.stop()
+        }
+        defer { timeout.cancel(); connection.stop() }
+        do {
+            let events = try connection.run(project: project,
+                executable: project.isRemote ? nil : (executableOverride ?? AgentLocator.executable(agent)),
+                sessionID: sessionID, resume: false, agent: "codex")
+            try await withTaskCancellationHandler {
+                connection.send(CodexSessionState.initialize)
+                var options = [BriefModelOption(id: "", name: "Default")]
+                var cursors: Set<String> = []
+                for await event in events {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .decoded(let decoded):
+                        let event = decoded.value
+                        guard let id = event["id"] as? String, ["rd-initialize", "rd-models"].contains(id) else { continue }
+                        if let failure = event["error"] as? [String: Any] {
+                            throw ResearchError.message(failure["message"] as? String ?? "Codex model discovery failed.")
+                        }
+                        if id == "rd-initialize" {
+                            connection.send(["method": "initialized"])
+                            connection.send(CodexSessionState.request("model/list", id: "rd-models", params: ["limit": 100]))
+                            continue
+                        }
+                        let result = event["result"] as? [String: Any] ?? [:]
+                        options = Self.codexModelOptions(result, appendingTo: options)
+                        if let cursor = result["nextCursor"] as? String, !cursor.isEmpty {
+                            guard cursors.insert(cursor).inserted else { throw ResearchError.message("Codex returned a repeated model-list cursor.") }
+                            connection.send(CodexSessionState.request("model/list", id: "rd-models", params: ["limit": 100, "cursor": cursor]))
+                        } else {
+                            guard options.count > 1 else { throw ResearchError.message("Codex returned no available models.") }
+                            modelOptions = options
+                            return
+                        }
+                    case .stderr: break
+                    case .exit(let code):
+                        throw ResearchError.message("Codex model discovery ended before returning models (exit \(code)). Check the CLI sign-in and connection on this workspace's machine.")
+                    }
+                }
+                throw ResearchError.message("Codex model discovery ended before returning models.")
+            } onCancel: { connection.stop() }
+        } catch is CancellationError {
+            // Closing a chat cancels discovery without surfacing an error.
+        } catch { modelLoadError = error.localizedDescription }
+    }
+
+    private static func codexModelOptions(_ result: [String: Any], appendingTo existing: [BriefModelOption]) -> [BriefModelOption] {
+        var options = existing
+        for model in result["data"] as? [[String: Any]] ?? [] {
+            guard let value = model["model"] as? String ?? model["id"] as? String,
+                  validModel(value), !options.contains(where: { $0.id == value }) else { continue }
+            options.append(BriefModelOption(id: value, name: model["displayName"] as? String ?? value))
+        }
+        return options
+    }
+
     private func updateModels(_ response: [String: Any]) {
         guard let models = response["models"] as? [[String: Any]], !models.isEmpty else { return }
         var options = [BriefModelOption(id: "", name: "Default")]
@@ -505,7 +666,7 @@ struct BriefAttachment: Identifiable {
                 contextUsage.tokens = records.last?.contextTokens
                 contextUsage.limit = records.last?.contextWindow
                 contextUsage.compacted = records.last?.contextCompacted == true
-                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown) }
+                replies = records.filter { $0.incomplete != true }.map { BriefReply(instruction: $0.instruction, markdown: $0.markdown, provider: $0.provider ?? agent) }
                 index = max(0, replies.count - 1)
                 interrupted = records.last?.incomplete == true
                 error = ""
@@ -580,6 +741,7 @@ struct BriefAttachment: Identifiable {
                 if let id = event["session_id"] as? String { sessionID = id }
                 if let model = event["model"] as? String { activeModel = model }
                 resume = true; status = "Claude is working…"; log("Connected to Claude Code")
+                if providerHandoff != nil { saveGeminiTranscript() }
             } else if let subtype = event["subtype"] as? String {
                 if subtype == "compact_boundary" { compactionConfirmed = true }
                 log(subtype.replacingOccurrences(of: "_", with: " "))
@@ -644,7 +806,7 @@ struct BriefAttachment: Identifiable {
                 interrupted = false
                 let result = (event["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if let answer = result.isEmpty ? finalResponse.finalText(resultConfirmsCompletion: true) : result {
-                    replies.append(BriefReply(instruction: pendingInstruction, markdown: answer))
+                    replies.append(BriefReply(instruction: pendingInstruction, markdown: answer, provider: agent))
                     hasUnreadReply = true
                     index = replies.count - 1
                     log("Final response received")
@@ -698,6 +860,15 @@ struct BriefAttachment: Identifiable {
     }
 
     func answer(_ permission: BriefPermission, allow: Bool) {
+        if agent == "gemini", let id = geminiPermissions.removeValue(forKey: permission.id) {
+            let options = permission.input["options"] as? [[String: Any]] ?? []
+            let kind = allow ? "allow_once" : "reject_once"
+            let option = options.first { $0["kind"] as? String == kind }
+            let outcome: [String: Any] = option?["optionId"].map { ["outcome": "selected", "optionId": $0] } ?? ["outcome": "cancelled"]
+            transport?.send(["jsonrpc": "2.0", "id": id, "result": ["outcome": outcome]])
+            permissions.removeAll { $0.id == permission.id }; status = "Gemini is working…"
+            return
+        }
         if agent == "codex", let id = codexApprovalIDs.removeValue(forKey: permission.id) {
             let method = permission.input["_codexMethod"] as? String ?? ""
             let result: [String: Any] = method == "item/permissions/requestApproval"
@@ -794,7 +965,12 @@ enum BriefConversationHistory {
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            return .success(try decoder.decode([SavedAgentSession].self, from: Data(output.0.utf8)))
+            var sessions = try decoder.decode([SavedAgentSession].self, from: Data(output.0.utf8))
+            for saved in AgentTranscriptStore.discover(host: project.host) {
+                sessions.removeAll { $0.agent == saved.agent && $0.id == saved.id }
+                sessions.append(saved)
+            }
+            return .success(sessions.sorted { $0.modified > $1.modified })
         } catch { return .failure(ResearchError.message("Conversation history could not be decoded. Try Refresh. " + error.localizedDescription)) }
     }
     static let script = #"""
@@ -843,8 +1019,10 @@ for folder in glob.glob(os.path.join(root, '*')):
 }
 
 enum BriefHistory {
-    struct Record: Decodable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int?; let contextCompacted: Bool? }
+    struct Record: Codable, Sendable { let instruction: String; let markdown: String; let incomplete: Bool?; let contextTokens: Int?; let contextWindow: Int?; let contextCompacted: Bool?; var provider: String? = nil }
     static func read(_ project: Project, id: String, agent: String = "claude") -> Result<[Record], Error> {
+        if let snapshot = AgentTranscriptStore.snapshot(project, id: id, agent: agent) { return .success(snapshot.records) }
+        if agent == "gemini" { return GeminiTranscriptStore.read(project, id: id) }
         if agent == "codex" { return CodexHistory.read(project, id: id) }
         guard UUID(uuidString: id) != nil else { return .failure(ResearchError.message("Invalid saved session ID.")) }
         let command = "python3 -c " + Command.shellQuote(script) + " " + Command.shellQuote(id)
@@ -990,6 +1168,10 @@ struct BriefAgentPane: View {
                     fresh.attachments = selected.attachments
                     store.remember(selected, for: project)
                     self.selected = fresh
+                }, switchProvider: { provider in
+                    if let fresh = store.switchProvider(of: selected, to: provider, for: project) {
+                        self.selected = fresh
+                    }
                 }).id(selected.id)
                     .onDisappear { if self.selected == nil || self.selected?.id == selected.id { store.remember(selected, for: project) } }
             } else {
@@ -1011,7 +1193,9 @@ struct BriefAgentPane: View {
                     }
                     Spacer()
                     Button("Refresh", systemImage: "arrow.clockwise") { store.discover(project) }.disabled(store.loadingHosts.contains(project.host))
-                    DeskChoiceMenu(title: newAgent == "codex" ? "Codex" : "Claude Code", choices: ["Claude Code", "Codex"], selection: newAgent == "codex" ? "Codex" : "Claude Code") { newAgent = $0 == "Codex" ? "codex" : "claude" }
+                    DeskChoiceMenu(title: GeminiACP.agentLabel(newAgent), choices: ["Claude Code", "Codex", "Gemini CLI"], selection: GeminiACP.agentLabel(newAgent)) {
+                        newAgent = $0 == "Codex" ? "codex" : $0 == "Gemini CLI" ? "gemini" : "claude"
+                    }
                     Button("New conversation", systemImage: "plus") { selected = store.create(for: project, agent: newAgent) }
                         .buttonStyle(DeskButtonStyle(prominent: true))
                 }.buttonStyle(DeskButtonStyle())
@@ -1020,7 +1204,7 @@ struct BriefAgentPane: View {
                     Toggle("This workspace only", isOn: $currentWorkspaceOnly).toggleStyle(.checkbox).font(.caption)
                 }
                 let allSaved = store.savedChats[project.host] ?? []
-                Text("Claude Code & Codex · \(project.isRemote ? project.host : "This Mac") · \(allSaved.count) saved conversations")
+                Text("Claude Code, Codex & Gemini · \(project.isRemote ? project.host : "This Mac") · \(allSaved.count) saved conversations")
                     .font(.caption).foregroundStyle(DeskStyle.muted)
                 if !store.discoveryError.isEmpty {
                     HStack(alignment: .top) {
@@ -1120,6 +1304,7 @@ struct BriefAgentView: View {
     @ObservedObject var model: DeskModel
     let goBack: () -> Void
     let startNewChat: () -> Void
+    let switchProvider: (String) -> Void
     @StateObject private var dictation = ConsoleDictation()
     @FocusState private var instructionFocused: Bool
     @State private var inspector = 0
@@ -1177,7 +1362,7 @@ struct BriefAgentView: View {
             }.padding(8)
         }
         .background(DeskStyle.background)
-        .task { session.refreshChanges(); model.refreshHistory(session.project) }
+        .task(id: session.id) { session.refreshChanges(); model.refreshHistory(session.project); await session.refreshModels() }
         .onChange(of: fileID) { _, _ in selected.removeAll(); anchor = nil }
         .onChange(of: session.changes.map(\.diff)) { _, _ in selected.removeAll(); anchor = nil }
         .onAppear { responseVisible = true; markViewedResponse() }
@@ -1254,6 +1439,9 @@ struct BriefAgentView: View {
                     .disabled(session.running || session.loadingHistory || session.reloading)
             }
             Spacer(minLength: 4)
+            if let provider = session.current?.provider {
+                Text(GeminiACP.agentLabel(provider)).font(.caption).foregroundStyle(DeskStyle.muted)
+            }
             if session.index < session.replies.count - 1 {
                 Button("Latest") { session.index = session.replies.count - 1 }
             }
@@ -1331,20 +1519,17 @@ struct BriefAgentView: View {
             .overlay(alignment: .top) { DeskStyle.edge.frame(height: 0.5) }
     }
     private var modelSelector: some View {
-        Menu {
-            ForEach(session.modelOptions) { option in
-                Button { session.chooseModel(option.id) } label: {
-                    if session.selectedModel == option.id { Label(option.name, systemImage: "checkmark") }
-                    else { Text(option.name) }
-                }
-            }
-            Divider()
-            Button("Custom model…") { customModel = session.selectedModel; showCustomModel = true }
-        } label: {
-            DeskMenuLabel(title: session.changingModel ? "Changing model…" : session.selectedModelName)
-        }
-        .menuStyle(.borderlessButton).fixedSize()
-        .disabled(session.running || session.changingModel || session.loadingHistory || session.reloading)
+        AgentModelMenu(
+            title: session.changingModel ? "Changing model…" : session.selectedModelName,
+            options: session.modelOptions, selectedModel: session.selectedModel, provider: session.agent,
+            enabled: !(session.running || session.changingModel || session.loadingHistory || session.reloading),
+            canSwitch: session.canSwitchProvider, loadingModels: session.loadingModels, modelError: session.modelLoadError,
+            chooseModel: { session.chooseModel($0) },
+            refreshModels: { Task { await session.refreshModels() } },
+            switchProvider: switchProvider,
+            customModel: { customModel = session.selectedModel; showCustomModel = true }
+        )
+        .fixedSize()
         .help(session.activeModel.isEmpty ? "Choose the " + session.agentName + " model for this conversation" : "Active model: " + session.activeModel)
         .popover(isPresented: $showCustomModel) {
             VStack(alignment: .leading, spacing: 12) {
@@ -1536,24 +1721,25 @@ extension BriefAgentModel {
             if id == "rd-initialize" {
                 transport?.send(["method": "initialized"])
                 transport?.send(CodexSessionState.request("model/list", id: "rd-models", params: ["limit": 100]))
-                // Preserve the account's sandbox and approval configuration.
-                var settings: [String: Any] = ["cwd": project.path]
+                // Apply automatic review to new and resumed conversations.
+                var settings: [String: Any] = ["cwd": project.path,
+                    "approvalPolicy": "on-request", "sandbox": "workspace-write",
+                    "approvalsReviewer": "auto_review"]
                 if !selectedModel.isEmpty { settings["model"] = selectedModel }
                 if resume { settings["threadId"] = sessionID; settings["excludeTurns"] = true }
                 transport?.send(CodexSessionState.request(resume ? "thread/resume" : "thread/start", id: "rd-thread", params: settings))
             } else if id == "rd-models" {
-                var options = [BriefModelOption(id: "", name: "Default")]
-                for model in result["data"] as? [[String: Any]] ?? [] {
-                    guard let value = model["model"] as? String ?? model["id"] as? String, Self.validModel(value) else { continue }
-                    options.append(BriefModelOption(id: value, name: model["displayName"] as? String ?? value))
-                    if model["isDefault"] as? Bool == true { codex.defaultModel = value }
+                let options = Self.codexModelOptions(result, appendingTo: [BriefModelOption(id: "", name: "Default")])
+                for model in result["data"] as? [[String: Any]] ?? [] where model["isDefault"] as? Bool == true {
+                    codex.defaultModel = model["model"] as? String ?? model["id"] as? String
                 }
-                modelOptions = options
+                if options.count > 1 { modelOptions = options; modelLoadError = "" }
             } else if id == "rd-thread" {
                 guard let thread = result["thread"] as? [String: Any], let id = thread["id"] as? String else { codexFailed("Codex did not return a thread ID."); transport?.stop(); return }
                 sessionID = id; resume = true; codex.threadReady = true
                 activeModel = result["model"] as? String ?? selectedModel
                 log("Connected to Codex")
+                if providerHandoff != nil { saveGeminiTranscript() }
                 if let prompt = queuedPrompt { queuedPrompt = nil; sendCodexTurn(prompt) }
             } else if id.hasPrefix("rd-turn-"), let turn = result["turn"] as? [String: Any] { codex.turnID = turn["id"] as? String }
             return
@@ -1634,7 +1820,7 @@ extension BriefAgentModel {
                 error = ""
                 let answer = codex.answer
                 if !answer.isEmpty {
-                    replies.append(BriefReply(instruction: pendingInstruction, markdown: answer)); index = replies.count - 1
+                    replies.append(BriefReply(instruction: pendingInstruction, markdown: answer, provider: agent)); index = replies.count - 1
                     hasUnreadReply = true
                 } else { error = "Codex completed without a final text response. You can send a follow-up." }
                 interrupted = false; resultFailed = false; running = false; status = "Ready for your next instruction"
@@ -1651,6 +1837,131 @@ extension BriefAgentModel {
             permissions.removeAll { $0.id == key }; codexQuestions.removeAll { $0.requestKey == key }; codexApprovalIDs.removeValue(forKey: key)
         case "warning": log(params["message"] as? String ?? "Codex warning")
         default: break
+        }
+    }
+}
+
+// Gemini CLI uses ACP over a persistent local process or SSH connection.
+extension BriefAgentModel {
+    private func geminiFailed(_ message: String) {
+        error = message; status = message; resultFailed = true; interrupted = running || resume
+        if running && instruction.isEmpty { instruction = pendingInstruction; attachments = pendingAttachments }
+        running = false; loadingModels = false; changingModel = false
+        queuedPrompt = nil; geminiPromptID = nil; permissions = []; geminiPermissions = [:]
+    }
+    private func saveGeminiTranscript(incomplete: Bool = false) {
+        var records = replies.map { BriefHistory.Record(instruction: $0.instruction, markdown: $0.markdown,
+            incomplete: false, contextTokens: nil, contextWindow: nil, contextCompacted: nil, provider: $0.provider ?? agent) }
+        if incomplete && !pendingInstruction.isEmpty {
+            records.append(.init(instruction: pendingInstruction, markdown: "", incomplete: true,
+                contextTokens: nil, contextWindow: nil, contextCompacted: nil))
+        }
+        do { try GeminiTranscriptStore.save(project, id: sessionID, title: title, records: records, agent: agent, handoff: providerHandoff, root: geminiTranscriptRoot) }
+        catch { self.error = "Could not save conversation: " + error.localizedDescription }
+    }
+    private func sendGeminiTurn(_ prompt: String) {
+        geminiAnswer = ""
+        let model = selectedModel.isEmpty ? geminiDefaultModel : selectedModel
+        if !model.isEmpty && model != activeModel {
+            queuedPrompt = prompt
+            transport?.send(GeminiACP.request("session/set_model", id: "gemini-model", params: ["sessionId": sessionID, "modelId": model]))
+            return
+        }
+        let id = "gemini-prompt-" + UUID().uuidString
+        geminiPromptID = id
+        saveGeminiTranscript(incomplete: true)
+        transport?.send(GeminiACP.request("session/prompt", id: id,
+            params: ["sessionId": sessionID, "prompt": [["type": "text", "text": outboundPrompt(prompt)]]]))
+        status = "Gemini is working…"
+    }
+    func consumeGemini(_ event: [String: Any]) {
+        let method = event["method"] as? String
+        let params = event["params"] as? [String: Any] ?? [:]
+        if let incoming = params["sessionId"] as? String, incoming != sessionID { return }
+        if method == nil, let id = event["id"] as? String {
+            if let failure = event["error"] as? [String: Any] {
+                let detail = failure["message"] as? String ?? "Gemini request failed."
+                geminiFailed(detail + (id == "gemini-session" ? " Run gemini in this workspace's terminal to complete sign-in, then reopen the chat." : ""))
+                transport?.stop(); return
+            }
+            let result = event["result"] as? [String: Any] ?? [:]
+            if id == "gemini-init" {
+                if resume, (result["agentCapabilities"] as? [String: Any])?["loadSession"] as? Bool != true {
+                    geminiFailed("This Gemini CLI version cannot resume ACP sessions. Update Gemini CLI on the workspace machine.")
+                    transport?.stop(); return
+                }
+                geminiLoadingSession = resume
+                var settings: [String: Any] = ["cwd": project.path, "mcpServers": []]
+                if resume { settings["sessionId"] = sessionID }
+                transport?.send(GeminiACP.request(resume ? "session/load" : "session/new", id: "gemini-session", params: settings))
+            } else if id == "gemini-session" {
+                if !resume {
+                    guard let value = result["sessionId"] as? String, !value.isEmpty else {
+                        geminiFailed("Gemini CLI did not return a session ID."); transport?.stop(); return
+                    }
+                    sessionID = value
+                }
+                geminiLoadingSession = false; geminiReady = true; loadingModels = false; resume = true
+                if let models = result["models"] as? [String: Any] {
+                    geminiDefaultModel = models["currentModelId"] as? String ?? ""
+                    activeModel = geminiDefaultModel
+                    var options = [BriefModelOption(id: "", name: "Default")]
+                    for model in models["availableModels"] as? [[String: Any]] ?? [] {
+                        guard let value = model["modelId"] as? String, Self.validModel(value), !options.contains(where: { $0.id == value }) else { continue }
+                        options.append(.init(id: value, name: model["name"] as? String ?? value))
+                    }
+                    modelOptions = options
+                }
+                log("Connected to Gemini CLI")
+                if let prompt = queuedPrompt { queuedPrompt = nil; sendGeminiTurn(prompt) }
+                else {
+                    status = "Ready for an instruction"
+                    if !loadingHistory { saveGeminiTranscript() }
+                }
+            } else if id == "gemini-model" {
+                activeModel = selectedModel.isEmpty ? geminiDefaultModel : selectedModel
+                if let prompt = queuedPrompt { queuedPrompt = nil; sendGeminiTurn(prompt) }
+            } else if id == geminiPromptID {
+                geminiPromptID = nil; receivedResult = true
+                let reason = result["stopReason"] as? String ?? "end_turn"
+                guard reason == "end_turn" else {
+                    geminiFailed("Gemini stopped: " + reason.replacingOccurrences(of: "_", with: " ")); saveGeminiTranscript(incomplete: true); return
+                }
+                let answer = geminiAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !answer.isEmpty {
+                    replies.append(.init(instruction: pendingInstruction, markdown: answer, provider: agent)); index = replies.count - 1; hasUnreadReply = true
+                }
+                running = false; interrupted = false; resultFailed = false
+                permissions = []; geminiPermissions = [:]; status = "Ready for your next instruction"
+                if answer.isEmpty { error = "Gemini completed without a text response. You can send a follow-up." }
+                saveGeminiTranscript(); flushProgress(); refreshChanges()
+            }
+            return
+        }
+        if method == "session/request_permission", let id = event["id"] {
+            let key = String(describing: id)
+            geminiPermissions[key] = id
+            let tool = params["toolCall"] as? [String: Any] ?? [:]
+            permissions.append(.init(id: key, tool: tool["title"] as? String ?? "Gemini tool", input: params))
+            status = "Waiting for tool approval"
+        } else if method == "session/update" {
+            guard !geminiLoadingSession, running, let update = params["update"] as? [String: Any] else { return }
+            switch update["sessionUpdate"] as? String {
+            case "agent_message_chunk":
+                if let content = update["content"] as? [String: Any], content["type"] as? String == "text" {
+                    geminiAnswer += content["text"] as? String ?? ""
+                }
+            case "tool_call":
+                // Text preceding a tool is progress, not the final answer.
+                geminiAnswer = ""
+                status = update["title"] as? String ?? "Gemini tool"; log(status)
+            case "tool_call_update":
+                if let title = update["title"] as? String { log(title) }
+            case "plan": log("Gemini updated its plan")
+            default: break
+            }
+        } else if let method, let id = event["id"] {
+            transport?.send(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "Unsupported client request: " + method]])
         }
     }
 }

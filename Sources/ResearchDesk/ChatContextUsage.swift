@@ -28,6 +28,7 @@ struct ChatContextUsage: Equatable {
         return "Context: " + count + (limit.map { " / " + $0.formatted() } ?? "") + " tokens"
     }
     static func handoff(from chatID: String, project: Project, draft: String, agent: String = "claude") -> String {
+        if agent == "gemini" { return "Continue the work from Gemini conversation \(chatID) in \(project.path). Ask me for any missing context.\n\nNew instructions:\n" + draft }
         if agent == "codex" { return "Continue from Codex conversation \(chatID).\nWorkspace: \(project.path) on \(project.isRemote ? project.host : "this Mac").\nRecover the relevant goals and next steps from that session in <CODEX_HOME or ~/.codex>/sessions, if available. Read only relevant portions and summarize what you need. If unavailable, ask me for the missing context.\n\nNew instructions:\n" + draft }
         return "Continue from Claude Code conversation \(chatID).\nWorkspace: \(project.path)\(project.isRemote ? " on " + project.host : " on this Mac").\nRecover the relevant goals, decisions, and next steps from that session's saved transcript (<CLAUDE_CONFIG_DIR or ~/.claude>/projects/*/\(chatID).jsonl). Read only the relevant portions and summarize what you need; keep this new chat's context concise. If the transcript is unavailable, ask me for the missing context.\n\nNew instructions:\n" + draft
     }

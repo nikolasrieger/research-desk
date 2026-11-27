@@ -67,14 +67,28 @@ root = os.environ.get('CODEX_HOME', os.path.expanduser('~/.codex'))
 files = glob.glob(os.path.join(root, 'sessions', '*', '*', '*', '*'+sys.argv[1]+'.jsonl'))
 if not files: sys.exit('Codex transcript is not available on this machine.')
 path = max(files, key=os.path.getmtime)
-records=[]; instruction=''; final=''; fallback=''; phased=False; active=False; tokens=None; window=None; compacted=False
+records=[]; instruction=''; final=''; fallback=''; phased=False; active=False; saw_assistant=False; event_user=False; tokens=None; window=None; compacted=False
 
 def flush(complete=False, message=None):
-    global instruction, final, fallback, phased, active
+    global instruction, final, fallback, phased, active, saw_assistant, event_user
     answer = str(message or (final if phased else fallback)).strip()
     if instruction:
         records.append(dict(instruction=instruction[:100000], markdown=answer[:150000] if complete else '', incomplete=not complete))
-    instruction=''; final=''; fallback=''; phased=False; active=False
+    instruction=''; final=''; fallback=''; phased=False; active=False; saw_assistant=False; event_user=False
+
+def user_text(payload):
+    content=payload.get('content', [])
+    metadata=payload.get('internal_chat_message_metadata_passthrough') or {}
+    kinds=metadata.get('content_item_kinds') if isinstance(metadata, dict) else None
+    parts=[]
+    for index, block in enumerate(content):
+        if not isinstance(block,dict) or block.get('type') not in ('input_text','text'): continue
+        if isinstance(kinds,list) and (index >= len(kinds) or kinds[index] != 'user.text'): continue
+        text=block.get('text','')
+        if not isinstance(text,str): continue
+        if not kinds and text.lstrip().startswith(('<environment_context>', '# AGENTS.md instructions')): continue
+        parts.append(text)
+    return '\n\n'.join(parts).strip()
 
 with open(path, 'rb') as f:
     start=max(0, os.path.getsize(path)-8000000); f.seek(start)
@@ -88,16 +102,27 @@ for line in lines:
     typ=p.get('type')
     if e.get('type')=='compacted' or (e.get('type')=='event_msg' and typ=='context_compacted'): tokens=None; compacted=True
     if e.get('type')=='event_msg':
-        if typ=='user_message':
+        if typ=='task_started':
             if instruction: flush()
-            instruction=str(p.get('message') or ''); active=True
+            active=True; saw_assistant=False; event_user=False
+        elif typ=='user_message':
+            # Older versions emit both response_item/user and user_message.
+            # The event is authoritative; do not add a duplicate turn.
+            if instruction and (event_user or saw_assistant): flush()
+            instruction=str(p.get('message') or ''); active=True; event_user=True
         elif typ=='task_complete': flush(True, p.get('last_agent_message'))
         elif typ in ('turn_aborted','task_failed'): flush()
         elif typ=='token_count':
             info=p.get('info') or {}; usage=info.get('last_token_usage') or {}
             tokens=usage.get('total_tokens'); window=info.get('model_context_window'); compacted=False
     elif e.get('type')=='response_item':
-        if typ=='message' and p.get('role')=='assistant':
+        if typ=='message' and p.get('role')=='user':
+            text=user_text(p)
+            if text and not event_user:
+                if saw_assistant: flush()
+                instruction=(instruction+'\n\n'+text).strip(); active=True
+        elif typ=='message' and p.get('role')=='assistant':
+            saw_assistant=True
             text='\n\n'.join(b.get('text','') for b in p.get('content',[]) if b.get('type')=='output_text')
             phase=p.get('phase')
             if phase is not None: phased=True

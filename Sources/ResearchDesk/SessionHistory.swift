@@ -27,7 +27,15 @@ struct SavedAgentSession: Codable, Identifiable, Sendable {
 
 enum SessionHistory {
     static func discover(_ project: Project) -> [SavedAgentSession]? {
-        project.isRemote ? remote(project) : local(project)
+        let sessions = project.isRemote ? remote(project) : local(project)
+        return sessions.map { native in
+            var merged = native
+            for saved in AgentTranscriptStore.discover(host: project.host) {
+                merged.removeAll { $0.agent == saved.agent && $0.id == saved.id }
+                merged.append(saved)
+            }
+            return merged.sorted { $0.modified > $1.modified }
+        }
     }
 
     private static func local(_ project: Project) -> [SavedAgentSession] {

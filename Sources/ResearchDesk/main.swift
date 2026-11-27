@@ -338,6 +338,7 @@ enum AgentLocator {
         environment.append("PATH=" + paths)
         environment.append("SHELL=/bin/zsh")
         var agentArguments = resumeLatest && agent == "codex" ? ["resume", "--last"] : resumeID.map { agent == "codex" ? ["resume", $0] : ["--resume", $0] } ?? (agent == "claude" ? ["--session-id", claudeSessionID] : [])
+        if resumeLatest && agent == "gemini" { agentArguments = ["--resume", "latest"] }
         if let initialPrompt { agentArguments.append(initialPrompt) }
         let workingDirectory = resumeWorkspace.flatMap { $0.hasPrefix("/") ? $0 : nil } ?? project.path
         if agent == "terminal" {
@@ -363,7 +364,7 @@ enum AgentLocator {
         let id = agent == "claude" ? claudeSessionID : resumeID
         let replacement = AgentSession(project: project, agent: agent, executable: executable,
                                        resumeID: id, resumeWorkspace: resumeWorkspace)
-        replacement.resumeLatest = agent == "codex" && id == nil
+        replacement.resumeLatest = (agent == "codex" || agent == "gemini") && id == nil
         replacement.artifactURL = artifactURL
         return replacement
     }
@@ -1338,6 +1339,7 @@ struct ProjectDetail: View {
                     VStack(spacing: 12) {
                         launcher("codex", symbol: "chevron.left.forwardslash.chevron.right")
                         launcher("claude", symbol: "terminal")
+                        launcher("gemini", symbol: "sparkles")
                     }
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
@@ -1350,6 +1352,7 @@ struct ProjectDetail: View {
                                     Text("All agents").tag("all")
                                     Text("Codex").tag("codex")
                                     Text("Claude").tag("claude")
+                                    Text("Gemini").tag("gemini")
                                 }
                             } label: {
                                 Text(agentFilter == "all" ? "All agents" : agentFilter.capitalized)
