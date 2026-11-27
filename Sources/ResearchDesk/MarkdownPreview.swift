@@ -126,7 +126,7 @@ struct MarkdownPreview: View, Equatable {
                         MarkdownCodeBlock(text: block.text, scrollsHorizontally: rendersTables)
                     case .table(let rows):
                         let widths = MarkdownTableLayout.columnWidths(rows)
-                        ScrollView(.horizontal) {
+                        MarkdownOverflowScroll {
                             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                                 ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
                                     GridRow {
@@ -231,6 +231,39 @@ enum MarkdownTableLayout {
     }
 }
 
+/// Measure the unconstrained content so short blocks fit naturally and tall blocks
+/// get their own vertical scrollbar instead of a compressed, clipped viewport.
+private struct MarkdownOverflowScroll<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var contentHeight: CGFloat = 200
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical], showsIndicators: true) {
+            content
+                .fixedSize(horizontal: true, vertical: true)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(key: MarkdownContentHeight.self, value: geometry.size.height)
+                    }
+                }
+                // Leave room for the horizontal scrollbar below the last row.
+                .padding(.bottom, 16)
+                .padding(.trailing, 16)
+        }
+        .scrollIndicators(.visible)
+        .frame(height: min(400, contentHeight + 16))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onPreferenceChange(MarkdownContentHeight.self) { contentHeight = $0 }
+    }
+}
+
+private struct MarkdownContentHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct MarkdownCodeBlock: View {
     let text: String
     let scrollsHorizontally: Bool
@@ -251,9 +284,9 @@ private struct MarkdownCodeBlock: View {
                     .accessibilityLabel(copied ? "Copied code" : "Copy code")
             }.padding(.horizontal, 6).padding(.top, 4)
             if scrollsHorizontally {
-                ScrollView(.horizontal) {
+                MarkdownOverflowScroll {
                     Text(text).font(.system(size: 12, design: .monospaced))
-                        .fixedSize(horizontal: true, vertical: false)
+                        .fixedSize(horizontal: true, vertical: true)
                         .padding(.horizontal, 15).padding(.bottom, 15)
                 }
             } else {
