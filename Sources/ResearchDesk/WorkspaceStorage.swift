@@ -36,6 +36,15 @@ enum WorkspaceStorage {
         return projects
     }
 
+    static func reordering(_ projects: [Project], moving id: UUID, to target: UUID, after: Bool) -> [Project]? {
+        guard id != target, let source = projects.firstIndex(where: { $0.id == id }), projects.contains(where: { $0.id == target }) else { return nil }
+        var result = projects
+        let moved = result.remove(at: source)
+        guard let destination = result.firstIndex(where: { $0.id == target }) else { return nil }
+        result.insert(moved, at: destination + (after ? 1 : 0))
+        return result
+    }
+
     static func save(_ projects: [Project]) throws {
         let file = fileURL
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),

@@ -2,6 +2,21 @@ import XCTest
 @testable import ResearchDesk
 
 final class JobsTests: XCTestCase {
+    func testDisplayOrderKeepsRunningJobsFirstAcrossStatusChanges() {
+        func job(_ id: String, _ status: String, _ submitted: Double) -> DeskJob {
+            DeskJob(id: id, name: id, project: "/tmp", kind: "process", submitted: submitted, status: status)
+        }
+        var jobs = [job("completed", "succeeded", 300), job("older-running", "running", 100),
+                    job("queued", "queued", 400), job("newer-running", "running", 200), job("failed", "failed", 250)]
+        XCTAssertEqual(jobs.sorted(by: DeskJob.displayOrder).map(\.id),
+                       ["newer-running", "older-running", "queued", "completed", "failed"])
+        jobs[1].status = "succeeded"
+        jobs[2].status = "running"
+        XCTAssertEqual(jobs.sorted(by: DeskJob.displayOrder).map(\.id),
+                       ["queued", "newer-running", "completed", "failed", "older-running"])
+        XCTAssertEqual([job("b", "running", 1), job("a", "running", 1)].sorted(by: DeskJob.displayOrder).map(\.id), ["a", "b"])
+    }
+
     private func fixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

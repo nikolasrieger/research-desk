@@ -26,12 +26,14 @@ struct StatisticsState: Codable, Sendable {
     var projects: [String: StatisticsProject] = [:]
     var selectedSeconds: [String: [String: Double]] = [:]
     var jobs: [String: StatisticsJob] = [:]
+    var tokenDays: [String: [String: Int64]]? = nil
 }
 
 struct StatisticsDay: Identifiable, Sendable {
     var id: String
     var date: Date
     var jobs = 0
+    var tokens: Int64 = 0
     var selectedSeconds = 0.0
     var gpuSeconds = 0.0
     var cpuSeconds = 0.0
@@ -117,6 +119,26 @@ struct StatisticsDay: Identifiable, Sendable {
             if state.jobs[id] != sample { state.jobs[id] = sample; dirty = true }
         }
     }
+    func ingestTokens(_ totals: [String: [String: Int64]], host: String) {
+        var values = state.tokenDays ?? [:]
+        let projects = state.projects.values.filter { $0.host == host }.sorted { $0.path.count > $1.path.count }
+        for project in projects { values[project.id] = [:] }
+        for (path, days) in totals {
+            let normalized = (path as NSString).standardizingPath
+            guard let owner = projects.first(where: {
+                let root = ($0.path as NSString).standardizingPath
+                return normalized == root || normalized.hasPrefix(root == "/" ? root : root + "/")
+            }) else { continue }
+            for (day, count) in days { values[owner.id, default: [:]][day, default: 0] += count }
+        }
+        state.tokenDays = values
+        dirty = true
+    }
+    func tokens(year: Int, project: String?) -> Int64 {
+        (state.tokenDays ?? [:]).filter { project == nil || $0.key == project }.values.reduce(0) { sum, days in
+            sum + days.filter { $0.key.hasPrefix(String(year) + "-") }.values.reduce(0, +)
+        }
+    }
     var projects: [StatisticsProject] { state.projects.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending } }
     nonisolated static func dayKey(_ date: Date, calendar: Calendar = .current) -> String {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
@@ -144,6 +166,9 @@ struct StatisticsDay: Identifiable, Sendable {
         }
         for (key, totals) in state.selectedSeconds where project == nil || project == key {
             for (day, seconds) in totals where values[day] != nil { values[day]?.selectedSeconds += seconds }
+        }
+        for (key, totals) in state.tokenDays ?? [:] where project == nil || project == key {
+            for (day, tokens) in totals where values[day] != nil { values[day]?.tokens += tokens }
         }
         if let active, let started, project == nil || project == active.id {
             Self.split(start: max(first, started), end: min(last, now), calendar: calendar) { key, seconds in values[key]?.selectedSeconds += seconds }
@@ -179,7 +204,20 @@ struct StatisticsPane: View {
     private var hours: Double { days.reduce(0) { $0 + $1.computeSeconds } / 3600 }
     private var selectedHours: Double { days.reduce(0) { $0 + $1.selectedSeconds } / 3600 }
     private var shownDay: StatisticsDay? { days.first { $0.id == selected } }
-    private func value(_ day: StatisticsDay) -> Double { metric == 0 ? Double(day.jobs) : (metric == 1 ? day.computeSeconds : day.selectedSeconds) / 3600 }
+    private var totalTokens: Int64 { days.reduce(0) { $0 + $1.tokens } }
+    private func value(_ day: StatisticsDay) -> Double {
+        switch metric {
+        case 0: return Double(day.jobs)
+        case 1: return day.computeSeconds / 3600
+        case 2: return day.selectedSeconds / 3600
+        default: return Double(day.tokens)
+        }
+    }
+    private func dayLabel(_ day: StatisticsDay) -> String {
+        if metric == 0 { return "\(day.jobs) jobs" }
+        if metric == 3 { return day.tokens.formatted() + " tokens" }
+        return String(format: "%.2f hours", value(day))
+    }
     var body: some View {
         GeometryReader { viewport in
         ScrollView {
@@ -214,16 +252,17 @@ struct StatisticsPane: View {
                     }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: 220, alignment: .trailing).help("Filter statistics by project")
                     Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(DeskButtonStyle(compact: true)).disabled(loading).help("Refresh job statistics")
+                        .buttonStyle(DeskButtonStyle(compact: true)).disabled(loading).help("Refresh job and token statistics")
                 }
                 HStack(spacing: 16) {
                     card("Jobs submitted", value: totalJobs.formatted(), detail: "Registered jobs", index: 0)
                     card("Compute time", value: String(format: "%.1f h", hours), detail: "Elapsed job hours", index: 1)
                     card("Time spent", value: String(format: "%.1f h", selectedHours), detail: "Time spent working on your projects, including while the app is unfocused", index: 2)
+                    card("Tokens", value: totalTokens.formatted(.number.notation(.compactName)), detail: "Reported Claude/Codex input, cached input and output from saved conversations: " + totalTokens.formatted() + " tokens", index: 3)
                 }
                 VStack(alignment: .leading, spacing: 20) {
                     HStack {
-                        Text(["Jobs", "Compute time", "Time spent"][metric]).font(.system(size: 14, weight: .medium))
+                        Text(["Jobs", "Compute time", "Time spent", "Tokens"][metric]).font(.system(size: 14, weight: .medium))
                         Spacer()
                         if loading { ProgressView().controlSize(.small) }
                         Button { year -= 1 } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain)
@@ -244,7 +283,7 @@ struct StatisticsPane: View {
                     HStack(alignment: .top, spacing: 32) {
                         VStack(alignment: .leading, spacing: 7) {
                             Text(day.date.formatted(date: .complete, time: .omitted)).font(.system(size: 14, weight: .medium))
-                            Text("\(day.jobs) jobs · \(String(format: "%.2f", day.selectedSeconds / 3600)) h spent")
+                            Text("\(day.jobs) jobs · \(String(format: "%.2f", day.selectedSeconds / 3600)) h spent · \(day.tokens.formatted()) tokens")
                                 .font(.caption).foregroundStyle(DeskStyle.muted)
                         }
                         Spacer()
@@ -315,8 +354,8 @@ struct StatisticsPane: View {
                                 Button { selected = day.id } label: {
                                     RoundedRectangle(cornerRadius: 3).fill(color(level)).frame(width: side, height: side)
                                         .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(selected == day.id ? DeskStyle.accent : .clear, lineWidth: 1))
-                                }.buttonStyle(.plain).help(day.id + " · " + (metric == 0 ? "\(day.jobs) jobs" : String(format: "%.2f h", v)))
-                                    .accessibilityLabel(day.id + ", " + (metric == 0 ? "\(day.jobs) jobs" : String(format: "%.2f hours", v)))
+                                }.buttonStyle(.plain).help(day.id + " · " + dayLabel(day))
+                                    .accessibilityLabel(day.id + ", " + dayLabel(day))
                             } else { Color.clear.frame(width: side, height: side) }
                         }
                     }
@@ -353,6 +392,21 @@ struct StatisticsPane: View {
             for (host, jobs) in results {
                 if let jobs { store.ingest(jobs, host: host) }
                 else { failures.append(host.isEmpty ? "This Mac" : host) }
+            }
+        }
+        for batch in stride(from: 0, to: hosts.count, by: 4) {
+            let results = await withTaskGroup(of: (String, [String: [String: Int64]]?).self) { group in
+                for host in hosts[batch..<min(batch + 4, hosts.count)] {
+                    group.addTask { await Task.detached { (host, try? TokenStatistics.read(host: host)) }.value }
+                }
+                var results: [(String, [String: [String: Int64]]?)] = []
+                for await result in group { results.append(result) }
+                return results
+            }
+            guard !Task.isCancelled else { loading = false; return }
+            for (host, totals) in results {
+                if let totals { store.ingestTokens(totals, host: host) }
+                else { failures.append((host.isEmpty ? "This Mac" : host) + " (tokens)") }
             }
         }
         store.checkpoint(); refreshed = Date(); rebuild(); loading = false

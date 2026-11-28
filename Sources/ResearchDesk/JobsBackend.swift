@@ -22,6 +22,11 @@ struct DeskJob: Codable, Identifiable, Sendable {
     var message: String?
     var checked: Double?
     var terminal: Bool { ["succeeded", "failed", "cancelled"].contains(status) }
+    static func displayOrder(_ lhs: Self, _ rhs: Self) -> Bool {
+        if (lhs.status == "running") != (rhs.status == "running") { return lhs.status == "running" }
+        if lhs.submitted != rhs.submitted { return lhs.submitted > rhs.submitted }
+        return lhs.id < rhs.id
+    }
     func elapsed(now: Date) -> TimeInterval? {
         if let runtime { return runtime + (status == "running" ? max(0, now.timeIntervalSince1970 - (checked ?? now.timeIntervalSince1970)) : 0) }
         guard let started else { return nil }

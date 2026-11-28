@@ -129,6 +129,20 @@ struct DeskSidebarRowStyle: ButtonStyle {
     }
 }
 
+/// A row gesture leaves native List drag tracking free to handle click-and-hold.
+private struct DeskProjectRowStyle: ViewModifier {
+    let selected: Bool
+    @State private var hovered = false
+    func body(content: Content) -> some View {
+        content.foregroundStyle(DeskStyle.accent)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(selected ? 0.115 : hovered ? 0.045 : 0))
+            }
+            .onHover { hovered = $0 }
+    }
+}
+
 /// A quiet, shared tab strip for project and paper workspaces.
 struct DeskTab: View {
     let title: String
@@ -707,6 +721,12 @@ enum Command {
     var statisticsProject: Project? { statisticsSelected || ideasSelected || paperSelected ? nil : current }
     var statisticsSelectionKey: String? { statisticsProject.map { StatisticsProject.key(host: $0.host, path: $0.path) } }
 
+    func moveProject(_ id: UUID, to target: UUID, after: Bool) {
+        guard let reordered = WorkspaceStorage.reordering(projects, moving: id, to: target, after: after) else { return }
+        projects = reordered
+        persist()
+    }
+
     func persist() {
         do {
             try WorkspaceStorage.save(projects)
@@ -1033,35 +1053,41 @@ enum Command {
                         .padding(.horizontal, 24).padding(.bottom, 12)
                     ScrollView {
                         LazyVStack(spacing: 5) {
-                            ForEach(model.projects) { project in
-                                Button { model.select(project) } label: {
-                                    HStack(spacing: 11) {
-                                        Image(systemName: project.isRemote ? "network" : "folder.fill")
-                                            .font(.system(size: 14))
-                                            .foregroundStyle(model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? DeskStyle.accent : DeskStyle.muted)
-                                            .frame(width: 19)
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? .medium : .regular)).lineLimit(1)
-                                            if project.isRemote {
-                                                Text(project.host).font(.system(size: 10)).foregroundStyle(DeskStyle.muted).lineLimit(1)
-                                            }
+                        ForEach(model.projects) { project in
+                                HStack(spacing: 11) {
+                                    Image(systemName: project.isRemote ? "network" : "folder.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? DeskStyle.accent : DeskStyle.muted)
+                                        .frame(width: 19)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(project.name).font(.system(size: 13, weight: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected ? .medium : .regular)).lineLimit(1)
+                                        if project.isRemote {
+                                            Text(project.host).font(.system(size: 10)).foregroundStyle(DeskStyle.muted).lineLimit(1)
                                         }
-                                        Spacer(minLength: 2)
-                                        BriefSidebarActivity(project: project, legacyRunning: model.sessions[project.id]?.ended == false)
                                     }
-                                    .padding(.horizontal, 12).padding(.vertical, 9)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(RoundedRectangle(cornerRadius: 9))
+                                    Spacer(minLength: 2)
+                                    BriefSidebarActivity(project: project, legacyRunning: model.sessions[project.id]?.ended == false)
                                 }
-                                .buttonStyle(DeskSidebarRowStyle(selected: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected))
-                                .contextMenu {
-                                    Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
-                                    Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
-                                    Divider()
-                                    Button("Rename…") { model.prepareRename(project) }
-                                    Button("Remove from desk", role: .destructive) { model.remove(project) }
-                                }
+                                .padding(.horizontal, 12).padding(.vertical, 9)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(RoundedRectangle(cornerRadius: 9))
+                            .modifier(DeskProjectRowStyle(selected: model.selected == project.id && !model.paperSelected && !model.ideasSelected && !model.statisticsSelected))
+                            .overlay {
+                                ProjectRowDrag(id: project.id, title: project.name,
+                                    accepts: { id in model.projects.contains { $0.id == id } },
+                                    select: { model.select(project) },
+                                    move: { id, after in model.moveProject(id, to: project.id, after: after) })
                             }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction { model.select(project) }
+                            .contextMenu {
+                                Button("Mark read") { BriefAgentStore.shared.mark(project, unread: false) }
+                                Button("Mark unread") { BriefAgentStore.shared.mark(project, unread: true) }
+                                Divider()
+                                Button("Rename…") { model.prepareRename(project) }
+                                Button("Remove from desk", role: .destructive) { model.remove(project) }
+                            }
+                        }
                         }.padding(.horizontal, 12)
                     }
                     if !model.storageError.isEmpty {

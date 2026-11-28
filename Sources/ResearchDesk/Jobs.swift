@@ -204,7 +204,7 @@ struct JobsPane: View {
     }
     private func hostSection(_ host: String) -> some View {
         let snapshot = model.snapshots[host]
-        let jobs = (snapshot?.jobs ?? []).filter { JobsBackend.matches($0, project: project.path) && !model.isHidden($0, host: host) }.filter { search.isEmpty || ($0.name + " " + $0.status).localizedCaseInsensitiveContains(search) }
+        let jobs = (snapshot?.jobs ?? []).filter { JobsBackend.matches($0, project: project.path) && !model.isHidden($0, host: host) }.filter { search.isEmpty || ($0.name + " " + $0.status).localizedCaseInsensitiveContains(search) }.sorted(by: DeskJob.displayOrder)
         return VStack(alignment: .leading, spacing: 4) {
             if let error = snapshot?.error, !error.isEmpty {
                 DisclosureGroup {
@@ -283,6 +283,7 @@ private struct MinimalJobRow: View {
     let checked: Date?
     let open: () -> Void
     @State private var hovered = false
+    private var running: Bool { job.status == "running" }
     private var tint: Color {
         if cached { return DeskStyle.muted }
         switch job.status {
@@ -300,7 +301,8 @@ private struct MinimalJobRow: View {
                     Text(job.name).font(.system(size: 12, weight: .medium))
                         .foregroundStyle(DeskStyle.accent).lineLimit(1)
                     Text((cached ? "Cached · " : "") + job.status.capitalized + (job.schedulerID.map { " · " + $0 } ?? ""))
-                        .font(.system(size: 10)).foregroundStyle(DeskStyle.muted)
+                        .font(.system(size: 10, weight: running ? .medium : .regular))
+                        .foregroundStyle(running && !cached ? DeskStyle.running : DeskStyle.muted)
                 }
                 Spacer(minLength: 4)
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -311,7 +313,10 @@ private struct MinimalJobRow: View {
                 Image(systemName: "chevron.right").font(.system(size: 8, weight: .medium))
                     .foregroundStyle(DeskStyle.muted).opacity(hovered ? 1 : 0).padding(.top, 4)
             }.padding(.horizontal, 10).padding(.vertical, 12)
-                .background(hovered ? DeskStyle.raised : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                .background(hovered ? DeskStyle.raised : running ? tint.opacity(0.07) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9).strokeBorder(running ? tint.opacity(0.22) : .clear, lineWidth: 0.5)
+                }
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).onHover { hovered = $0 }
             .accessibilityLabel(job.name + ", " + job.status + (cached ? ", cached" : ""))
